@@ -45,6 +45,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
+import { makeAdapters, agentrunTool, WorkflowStore } from "@open-instinct/agentrun";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
 const SKILLS_REFRESH_MS = 30_000;
@@ -427,6 +428,35 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       }),
     ...(env.INSTINCT_REPLY_BUDGET_MS ? { replyBudgetMs: Number(env.INSTINCT_REPLY_BUDGET_MS) } : {}),
   });
+
+  // AgentRun workflow integration — opt-in via INSTINCT_AGENTRUN=1.
+  // Registers the `agentrun` tool so the agent can author, inspect, and run
+  // typed workflows with recovery and decision recording.
+  let agentrunDeps: ReturnType<typeof makeAdapters> | undefined;
+  if (env.INSTINCT_AGENTRUN === "1") {
+    const store = new WorkflowStore(state);
+    agentrunDeps = makeAdapters({
+      runtime,
+      registry,
+      policy,
+      approvals,
+      audit,
+      outbox,
+      model,
+      state,
+      ownerPrincipal: () => runtime.ownerPrincipal(),
+      channel: "chat",
+      now: () => new Date(),
+    });
+    registry.register(agentrunTool({ store, adapters: agentrunDeps, stateDir: state, registry }));
+    promptSections.push(
+      "# AgentRun workflows\n" +
+      "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
+      "Use it when a task benefits from checkpoints, structured decisions, recovery, or a sequence of " +
+      "tool calls that must be inspected before committing. Workflows run under the same policy guard " +
+      "as your direct tool calls: capabilities, tiers, spend limits, and approvals all apply.",
+    );
+  }
 
   const stopScheduler = scheduler.start((entry) => runtime.runScheduled(entry));
 

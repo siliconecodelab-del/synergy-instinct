@@ -28,9 +28,9 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^1.0.1",
-    "@earendil-works/pi-ai": "^1.0.1",
-    "@earendil-works/pi-coding-agent": "^1.0.1",
+    "@earendil-works/pi-agent-core": ">=1.0.4 <1.4.0",
+    "@earendil-works/pi-ai": ">=1.0.4 <1.4.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.4 <1.4.0",
     "@inkbox/sdk": "^0.7.13",
     "@open-instinct/ample": "workspace:*",
     "@open-instinct/apps": "workspace:*",
@@ -40,7 +40,8 @@
     "@open-instinct/core": "workspace:*",
     "@open-instinct/inkbox": "workspace:*",
     "@open-instinct/network": "workspace:*",
-    "@open-instinct/payments": "workspace:*"
+    "@open-instinct/payments": "workspace:*",
+    "@open-instinct/agentrun": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

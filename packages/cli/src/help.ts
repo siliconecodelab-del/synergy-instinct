@@ -59,6 +59,12 @@ export const HELP_GROUPS: HelpGroup[] = [
         example: 'instinct chat "what is on my calendar tomorrow"',
       },
       {
+        name: "agentrun",
+        usage: "agentrun <inspect|validate|dry-run|list|run> <file|name> [--data-dir <dir>]",
+        summary: "Inspect, validate, dry-run, list, or run AgentRun workflows. Run requires a running agent server.",
+        example: 'instinct agentrun inspect workflow.json',
+      },
+      {
         name: "status",
         usage: "status [--url http://127.0.0.1:8080]",
         summary: "Show what a running server reports on GET /. Sends INSTINCT_CHAT_TOKEN when set.",

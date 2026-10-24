@@ -7,6 +7,7 @@ import { makeContext, type CliContext } from "./context.js";
 import { renderHelp } from "./help.js";
 import { CliError, UsageError, type CliIo } from "./io.js";
 import { runChat } from "./commands/chat.js";
+import { runAgentrun } from "./commands/agentrun.js";
 import { runConnect } from "./commands/connect.js";
 import { runDeploy } from "./commands/deploy.js";
 import { runDev } from "./commands/dev.js";
@@ -26,6 +27,7 @@ type Command = (ctx: CliContext, argv: string[]) => Promise<number>;
 const COMMANDS: Record<string, Command> = {
   init: runInit,
   connect: runConnect,
+  agentrun: runAgentrun,
   dev: runDev,
   chat: runChat,
   status: runStatus,
