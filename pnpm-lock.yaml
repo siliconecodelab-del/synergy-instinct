@@ -43,6 +43,9 @@ importers:
       '@parcha/agentrun-jev':
         specifier: 0.1.0-beta.21
         version: 0.1.0-beta.21
+      '@parcha/agentrun-pi':
+        specifier: 0.1.0-beta.21
+        version: 0.1.0-beta.21(@earendil-works/pi-agent-core@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-ai@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-coding-agent@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.3.0)(typebox@1.3.27)
       typebox:
         specifier: 1.3.27
         version: 1.3.27
@@ -386,6 +389,9 @@ importers:
       '@open-instinct/payments':
         specifier: workspace:*
         version: link:../payments
+      '@parcha/agentrun-dsl':
+        specifier: 0.1.0-beta.21
+        version: 0.1.0-beta.21
     devDependencies:
       '@types/node':
         specifier: ^22.15.0
@@ -751,6 +757,34 @@ packages:
   '@parcha/agentrun-jev@0.1.0-beta.21':
     resolution: {integrity: sha512-+Cdje8yKgBTYq3bn9g5t8uvvTJB7Yn3BdbHwXjqcMimAi3qzK6f0I1rpavP1ngPPgoTVWY9fEblVuCK8IWE0Aw==}
     engines: {node: '>=22.19.0'}
+
+  '@parcha/agentrun-pi@0.1.0-beta.21':
+    resolution: {integrity: sha512-wYhR+wU1UePjZw4CaqnAAA6wRnmJtc83h3AZLmpJJMr75JYMcCTysYZ7r+O4VNg5T7WdJPhGQJ7Nd1piIll0lQ==}
+    engines: {node: '>=22.19.0'}
+    hasBin: true
+    peerDependencies:
+      '@earendil-works/chord': '>=1.0.4 <1.4.0'
+      '@earendil-works/pi-agent-core': '*'
+      '@earendil-works/pi-ai': '*'
+      '@earendil-works/pi-coding-agent': '*'
+      '@earendil-works/pi-durable': '>=1.0.4 <1.4.0'
+      '@earendil-works/pi-tui': '*'
+      typebox: '*'
+    peerDependenciesMeta:
+      '@earendil-works/chord':
+        optional: true
+      '@earendil-works/pi-agent-core':
+        optional: true
+      '@earendil-works/pi-ai':
+        optional: true
+      '@earendil-works/pi-coding-agent':
+        optional: true
+      '@earendil-works/pi-durable':
+        optional: true
+      '@earendil-works/pi-tui':
+        optional: true
+      typebox:
+        optional: true
 
   '@peculiar/asn1-asym-key@2.10.0':
     resolution: {integrity: sha512-1R8xUTeqcUTSMLFTTCzJyFuKiq3y25EQKs9DezUetJ8qMqbJyxo3XkzykiwwT/Xzlt5/vRzS/sW4M1r+pq1FTg==}
@@ -2448,6 +2482,17 @@ snapshots:
     dependencies:
       '@parcha/agentrun-dsl': 0.1.0-beta.21
       '@typesafe-ai/sdk': 0.7.0
+
+  '@parcha/agentrun-pi@0.1.0-beta.21(@earendil-works/pi-agent-core@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-ai@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-coding-agent@1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.3.0)(typebox@1.3.27)':
+    dependencies:
+      '@parcha/agentrun-dsl': 0.1.0-beta.21
+      '@parcha/agentrun-jev': 0.1.0-beta.21
+    optionalDependencies:
+      '@earendil-works/pi-agent-core': 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-ai': 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-coding-agent': 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-tui': 1.3.0
+      typebox: 1.3.27
 
   '@peculiar/asn1-asym-key@2.10.0':
     dependencies:

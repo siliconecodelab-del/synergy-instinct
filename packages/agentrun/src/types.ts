@@ -4,6 +4,7 @@
 import type { AgentRuntime, ApprovalStore, AuditLog, Outbox, PolicyEngine, Principal, StateDir, ToolRegistry } from "@open-instinct/core";
 import type { Model } from "@earendil-works/pi-ai";
 import type { JevJudge } from "@parcha/agentrun-jev";
+import type { CodeNode, MapItem } from "@parcha/agentrun-dsl";
 
 export interface AgentRunAdapterDeps {
   /** Open Instinct runtime for conversation-backed agent steps. */
@@ -28,6 +29,14 @@ export interface AgentRunAdapterDeps {
   channel?: "chat" | "a2a" | "imessage" | "sms" | "email";
   /** Optional live Jev runner. Without it, `runJudge` uses a fixed-probability offline fallback. */
   jevRunner?: JevJudge;
+  /** Optional sandboxed executor for `code` nodes. Without it, code runs in-process (not sandboxed). */
+  runCode?: (node: CodeNode, state: Record<string, unknown>, ctx: {
+    sop: string;
+    label: string;
+    executionPath: string;
+    item?: MapItem;
+    signal?: AbortSignal;
+  }) => Promise<unknown>;
   /** Clock. Defaults to system time. */
   now?: () => Date;
 }

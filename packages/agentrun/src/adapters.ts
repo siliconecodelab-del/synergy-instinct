@@ -44,6 +44,7 @@ export function makeAdapters(deps: AgentRunAdapterDeps) {
     ownerPrincipal,
     channel = "chat",
     jevRunner,
+    runCode,
     now = () => new Date(),
   } = deps;
 
@@ -253,7 +254,7 @@ Do not add extra text after calling the tool. The tool result is the final answe
     };
   };
 
-  return { runEffect, runNode, runJudge };
+  return { runEffect, runNode, runJudge, runCode: runCode ?? undefined };
 }
 
 /** Convert a core RegisteredTool-like spec to a Pi AgentTool. */

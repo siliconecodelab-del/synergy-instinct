@@ -43,10 +43,12 @@ export async function runWorkflowWithRecovery(
   };
 
   // Wrap with recovery: runEffect/runNode/runJudge learn about committed state
+  // runCode is passed through for sandboxed code-node execution.
   const deps: WorkflowDeps = withRecovery(driver, {
     runEffect: adapters.runEffect,
     runNode: adapters.runNode,
     runJudge: adapters.runJudge,
+    runCode: adapters.runCode ?? undefined,
     recordDecision,
     signal: options?.signal,
   });

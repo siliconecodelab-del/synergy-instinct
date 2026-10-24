@@ -45,7 +45,8 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery } from "@open-instinct/agentrun";
+import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
 const SKILLS_REFRESH_MS = 30_000;
@@ -82,7 +83,14 @@ export interface BootResult {
   /** Complete compact Inkbox events before handing them to the runtime. */
   hydrateInbound?: (message: InboundMessage) => Promise<InboundMessage>;
   /** Set with Inkbox: text the owner the outcome of a finished phone call. */
-  onCallEnded?: (event: CallEndedEvent) => Promise<void>;
+  onCallEnded?(event: CallEndedEvent): Promise<void>;
+  /** AgentRun workflow integration (optional, INSTINCT_AGENTRUN=1). */
+  agentrun?: {
+    store: WorkflowStore;
+    adapters: ReturnType<typeof makeAdapters>;
+    stateDir: StateDir;
+    run: (workflow: unknown, input: Record<string, unknown>, options?: { runId?: string; signal?: AbortSignal }) => Promise<{ status: "complete" | "escalated"; output?: unknown; escalation?: any }>;
+  };
 }
 
 export const DEFAULT_MARITIME_MCP_URL = "https://mcp.maritime.sh";
@@ -432,9 +440,10 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   // AgentRun workflow integration — opt-in via INSTINCT_AGENTRUN=1.
   // Registers the `agentrun` tool so the agent can author, inspect, and run
   // typed workflows with recovery and decision recording.
+  let agentrunStore: WorkflowStore | undefined;
   let agentrunDeps: ReturnType<typeof makeAdapters> | undefined;
   if (env.INSTINCT_AGENTRUN === "1") {
-    const store = new WorkflowStore(state);
+    agentrunStore = new WorkflowStore(state);
     agentrunDeps = makeAdapters({
       runtime,
       registry,
@@ -448,7 +457,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       channel: "chat",
       now: () => new Date(),
     });
-    registry.register(agentrunTool({ store, adapters: agentrunDeps, stateDir: state, registry }));
+    registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
@@ -498,6 +507,17 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     ...(wallet ? { wallet } : {}),
     ...(hydrator ? { hydrateInbound: (message: InboundMessage) => hydrator.hydrate(message) } : {}),
     ...(channel ? { onCallEnded: callReporter(channel, (text, key) => runtime.relayToOwner(text, key), log) } : {}),
+    ...(agentrunStore && agentrunDeps
+      ? {
+          agentrun: {
+            store: agentrunStore,
+            adapters: agentrunDeps,
+            stateDir: state,
+            run: (workflow: unknown, input: Record<string, unknown>, options?: { runId?: string; signal?: AbortSignal }) =>
+              runWorkflowWithRecovery(workflow as Workflow, input, agentrunDeps, state, options),
+          },
+        }
+      : {}),
     async close() {
       stopScheduler();
       sync?.stop();

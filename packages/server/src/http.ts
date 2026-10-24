@@ -17,6 +17,8 @@ import { decodeEvent, systemTaskOf } from "@open-instinct/core";
 import type { AgentRuntime, HandleResult, InboundMessage, InstinctConfig, OutboundMessage, ScheduleEntry, Scheduler, StateDir } from "@open-instinct/core";
 import { DurableInbox, parseCallEnded, parseInkboxEvent, verifyInkboxSignature } from "@open-instinct/inkbox";
 import type { CallEndedEvent } from "@open-instinct/inkbox";
+import type { AgentRunAdapters, AgentRunResult, WorkflowStore } from "@open-instinct/agentrun";
+import { inspectWorkflow, validateWorkflow, dryRunWorkflow, type Workflow } from "@parcha/agentrun-dsl";
 
 /** Replies the console outbox is holding for a chat conversation. */
 export interface ChatBuffer {
@@ -51,6 +53,13 @@ export interface HttpApp {
   wallet?: WalletCallback;
   /** Report a finished phone call to the owner. Unset: call.ended events are acknowledged and dropped. */
   onCallEnded?(event: CallEndedEvent): Promise<void>;
+  /** AgentRun workflow integration (optional, INSTINCT_AGENTRUN=1). */
+  agentrun?: {
+    store: WorkflowStore;
+    adapters: AgentRunAdapters;
+    stateDir: StateDir;
+    run: (workflow: unknown, input: Record<string, unknown>, options?: { runId?: string; signal?: AbortSignal }) => Promise<AgentRunResult>;
+  };
 }
 
 export interface HttpServerOptions {
@@ -388,6 +397,87 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
         log(`chat failed: ${(err as Error).message}`);
         return sendJson(res, 500, { error: "agent error", response: "" });
       }
+    }
+
+    // AgentRun workflow endpoints (INSTINCT_AGENTRUN=1).
+    if (app.agentrun && method === "POST" && path === "/agentrun/run") {
+      const raw = await readBody(req, limit);
+      if (raw === undefined) return sendJson(res, 413, { error: "body too large" });
+      const body = parseJson(raw);
+      if (!body || typeof body !== "object") {
+        return sendJson(res, 400, { error: "expected JSON { workflow?, name?, input?, runId? }" });
+      }
+      try {
+        const wf = (body as { workflow?: unknown }).workflow;
+        const name = (body as { name?: string }).name;
+        const input = (body as { input?: Record<string, unknown> }).input ?? {};
+        let workflow: unknown;
+        if (wf && typeof wf === "object") {
+          workflow = wf;
+        } else if (name) {
+          const saved = app.agentrun.store.load(name);
+          if (!saved) return sendJson(res, 404, { error: `No saved workflow named "${name}".` });
+          workflow = saved;
+        } else {
+          return sendJson(res, 400, { error: "Pass `workflow` or `name` to run a workflow." });
+        }
+        const result = await app.agentrun.run(workflow, input, { runId: (body as { runId?: string }).runId });
+        return sendJson(res, 200, result);
+      } catch (err) {
+        log(`agentrun run failed: ${(err as Error).message}`);
+        return sendJson(res, 500, { error: `workflow run failed: ${(err as Error).message}` });
+      }
+    }
+
+    if (app.agentrun && method === "POST" && path === "/agentrun/inspect") {
+      const raw = await readBody(req, limit);
+      if (raw === undefined) return sendJson(res, 413, { error: "body too large" });
+      const body = parseJson(raw);
+      if (!body || typeof body !== "object") {
+        return sendJson(res, 400, { error: "expected JSON { workflow: object }" });
+      }
+      try {
+        inspectWorkflow(body as Workflow);
+        return sendJson(res, 200, { ok: true, message: "Workflow is structurally valid." });
+      } catch (err) {
+        return sendJson(res, 400, { error: `Workflow inspection failed: ${(err as Error).message}` });
+      }
+    }
+
+    if (app.agentrun && method === "POST" && path === "/agentrun/validate") {
+      const raw = await readBody(req, limit);
+      if (raw === undefined) return sendJson(res, 413, { error: "body too large" });
+      const body = parseJson(raw);
+      if (!body || typeof body !== "object") {
+        return sendJson(res, 400, { error: "expected JSON { workflow: object }" });
+      }
+      try {
+        validateWorkflow(body as Workflow);
+        return sendJson(res, 200, { ok: true, message: "Workflow is valid." });
+      } catch (err) {
+        return sendJson(res, 400, { error: `Workflow validation failed: ${(err as Error).message}` });
+      }
+    }
+
+    if (app.agentrun && method === "POST" && path === "/agentrun/dry-run") {
+      const raw = await readBody(req, limit);
+      if (raw === undefined) return sendJson(res, 413, { error: "body too large" });
+      const body = parseJson(raw);
+      if (!body || typeof body !== "object") {
+        return sendJson(res, 400, { error: "expected JSON { workflow: object, input?: object }" });
+      }
+      try {
+        const input = (body as { input?: Record<string, unknown> }).input ?? {};
+        const result = await dryRunWorkflow(body as Workflow, { input });
+        return sendJson(res, 200, result);
+      } catch (err) {
+        return sendJson(res, 400, { error: `Dry-run failed: ${(err as Error).message}` });
+      }
+    }
+
+    if (app.agentrun && method === "GET" && path === "/agentrun/list") {
+      const names = app.agentrun.store.list();
+      return sendJson(res, 200, { workflows: names });
     }
 
     sendJson(res, 404, { error: "not found" });
