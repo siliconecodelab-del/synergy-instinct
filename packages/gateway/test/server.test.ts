@@ -1,8 +1,10 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { decodeEvent } from "@open-instinct/core";
+import type { ComposioPlatform } from "../src/composio.js";
 import { silentLogger } from "../src/logger.js";
 import type { RouterInfo } from "../src/pages.js";
+import { MARITIME_AGENT_PORT } from "../src/provision.js";
 import { type GatewayOptions, createGateway } from "../src/server.js";
 import { type UserRecord, UserStore } from "../src/store.js";
 import { fakeInkbox, fakeMaritime, imessageEvent, readyUser, signHeaders, tempDir } from "./helpers.js";
@@ -22,6 +24,9 @@ interface BootOpts {
   notifyExisting?: GatewayOptions["notifyExisting"];
   seed?: UserRecord[];
   now?: () => number;
+  adminToken?: string;
+  githubToken?: string;
+  composio?: ComposioPlatform;
 }
 
 async function boot(opts: BootOpts = {}) {
@@ -43,6 +48,9 @@ async function boot(opts: BootOpts = {}) {
     link: opts.link,
     notifyExisting: opts.notifyExisting,
     now: opts.now,
+    adminToken: opts.adminToken,
+    githubToken: opts.githubToken,
+    composio: opts.composio,
   });
   servers.push(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -159,35 +167,38 @@ describe("gateway http", () => {
     expect(good.headers.get("location")).toMatch(/^\/connect\/usr_/);
   });
 
-  it("answers a repeat phone with a neutral response and never reveals the existing record", async () => {
+  it("gives a repeat phone a brand-new agent and never reveals the existing record", async () => {
     const notified: string[] = [];
     const { base, store } = await boot({ notifyExisting: async (u, url) => void notified.push(`${u.id} ${url}`) });
-    store.save(readyUser({ id: "usr_a", name: "Maria Secret", handle: "maria", phone: "+14155550123" }));
+    store.save(readyUser({ id: "usr_seedmaria", name: "Maria Secret", handle: "maria", phone: "+14155550123" }));
 
     const samePhone = await signup(base, { name: "x", phone: "+14155550123", handle: "zzz-random" });
     expect(samePhone.status).toBe(202);
     const body = (await samePhone.json()) as Record<string, unknown>;
-    expect(body).toEqual({ status: "pending" });
-    expect(JSON.stringify(body)).not.toContain("usr_a");
+    // The caller learns only about the record just created for them.
+    expect(body).toMatchObject({ status: "provisioning", templateId: "default" });
+    expect(String(body.userId)).toMatch(/^usr_/);
+    expect(body.userId).not.toBe("usr_seedmaria");
+    expect(String(body.connectUrl)).toContain(String(body.userId));
+    expect(JSON.stringify(body)).not.toContain("usr_seedmaria");
+    expect(JSON.stringify(body)).not.toContain("Maria Secret");
 
     const asHtml = await fetch(`${base}/api/signup`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
-      body: new URLSearchParams({ name: "x", phone: "+14155550123", handle: "zzz-random" }).toString(),
+      body: new URLSearchParams({ name: "x", phone: "+14155550123", handle: "zzz-two" }).toString(),
       redirect: "manual",
     });
-    expect(asHtml.status).toBe(202);
-    const page = await asHtml.text();
-    expect(page).toContain("Check your phone");
-    expect(page).toContain("connect @zzz-random");
-    expect(page).not.toContain("usr_a");
-    expect(page).not.toContain("Maria Secret");
-    expect(page).not.toContain("@maria<");
+    expect(asHtml.status).toBe(303);
+    const location = asHtml.headers.get("location") ?? "";
+    expect(location).toMatch(/^\/connect\/usr_/);
+    expect(location).not.toContain("usr_seedmaria");
 
-    // The existing person can still be reached out of band.
-    expect(notified).toEqual(["usr_a https://gw.example.com/connect/usr_a", "usr_a https://gw.example.com/connect/usr_a"]);
-    // No second record was created.
-    expect(store.all()).toHaveLength(1);
+    // The existing record is untouched, and a fresh agent earns no reuse notice.
+    expect(notified).toEqual([]);
+    expect(store.all()).toHaveLength(3);
+    expect(store.byHandle("maria")?.id).toBe("usr_seedmaria");
+    expect(store.byHandle("zzz-random")?.phone).toBe("+14155550123");
   });
 
   it("hides handle conflicts behind a generic error unless an invite code gates the form", async () => {
@@ -209,16 +220,43 @@ describe("gateway http", () => {
     const { base, store, ink } = await boot({ seed: [stuck] });
     const retry = await signup(base, { name: "Maria", phone: "+14155550123", handle: "maria" });
     expect(retry.status).toBe(202);
-    expect(await retry.json()).toEqual({ status: "pending" });
+    const retryBody = (await retry.json()) as Record<string, unknown>;
+    expect(retryBody).toMatchObject({ status: "pending", userId: "usr_stuck", handle: "maria" });
+    expect(String(retryBody.connectUrl)).toContain("usr_stuck");
     await waitFor(() => store.get("usr_stuck")?.status === "ready");
     expect(ink.calls[0]).toBe("provisionIdentity");
     expect(store.all()).toHaveLength(1);
 
-    // A ready record is left alone.
+    // A ready record is left alone — the JSON reply still identifies the caller's own agent.
     const again = await signup(base, { name: "Maria", phone: "+14155550123", handle: "maria" });
     expect(again.status).toBe(202);
+    expect((await again.json()) as Record<string, unknown>).toMatchObject({ status: "pending", userId: "usr_stuck" });
     await new Promise((r) => setTimeout(r, 30));
     expect(ink.calls.filter((c) => c === "provisionIdentity")).toHaveLength(1);
+
+    // The HTML path for the same record still renders the pending page.
+    const htmlRetry = await fetch(`${base}/api/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+      body: new URLSearchParams({ name: "Maria", phone: "+14155550123", handle: "maria" }).toString(),
+      redirect: "manual",
+    });
+    expect(htmlRetry.status).toBe(202);
+    const page = await htmlRetry.text();
+    expect(page).toContain("Check your phone");
+    expect(page).toContain("connect @maria");
+  });
+
+  it("re-syncs a ready agent's env in the background when its owner re-submits the same details", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()] });
+    mar.env["agt_42"] = [{ key: "PORT", value: String(MARITIME_AGENT_PORT) }];
+    const again = await signup(base, { name: "Maria", phone: "+14155550123", handle: "maria" });
+    expect(again.status).toBe(202);
+    const body = (await again.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ status: "pending", userId: "usr_test", handle: "maria" });
+    // The ready branch re-synced env without ever creating a second agent.
+    await waitFor(() => mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/env")));
+    expect(mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/api/agents"))).toBe(false);
   });
 
   it("resumePending restarts every record a crash left in provisioning", async () => {
@@ -438,5 +476,462 @@ describe("gateway http", () => {
     const connect = await fetch(`${base}/connect/usr_missing`);
     expect(connect.status).toBe(404);
     expect(await connect.text()).toContain("No Instinct with that id");
+  });
+});
+
+describe("admin desktop api", () => {
+  function patch(base: string, token: string | undefined, userId: string, body: unknown = { enabled: true }) {
+    return fetch(`${base}/api/admin/desktop/${userId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("answers 503 while the admin token is not configured", async () => {
+    const { base } = await boot({ seed: [readyUser()] });
+    const res = await patch(base, "whatever", "usr_test");
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/not configured/);
+  });
+
+  it("rejects a bad bearer token with 401 before touching anything", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    const res = await patch(base, "wrong", "usr_test");
+    expect(res.status).toBe(401);
+    expect(mar.calls).toHaveLength(0);
+  });
+
+  it("patches the agent's desktop-config and returns Maritime's answer", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    mar.queue.push({ body: { enabled: true, status: "ok" } });
+    const res = await patch(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, desktop: { enabled: true, status: "ok" } });
+    const call = mar.calls.find((c) => c.method === "PATCH");
+    expect(call?.url).toBe("https://maritime.test/api/agents/agt_42/desktop-config");
+    expect(call?.body).toEqual({ enabled: true });
+  });
+
+  it("maps unknown users, unready agents and bad bodies", async () => {
+    const { base } = await boot({ seed: [readyUser({ maritimeAgentId: undefined })], adminToken: "adm_secret" });
+    expect((await patch(base, "adm_secret", "usr_missing")).status).toBe(404);
+    expect((await patch(base, "adm_secret", "usr_test")).status).toBe(409);
+
+    const ready = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    expect((await patch(ready.base, "adm_secret", "usr_test", { enabled: "yes" })).status).toBe(400);
+    expect((await patch(ready.base, "adm_secret", "usr_test", {})).status).toBe(400);
+  });
+
+  it("passes Maritime's own constraint errors through", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    mar.queue.push(402);
+    const res = await patch(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(402);
+  });
+});
+
+describe("admin reprovision api", () => {
+  function repro(base: string, token: string | undefined, userId: string) {
+    return fetch(`${base}/api/admin/reprovision/${userId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+  }
+
+  it("answers 503 while the admin token is not configured", async () => {
+    const { base } = await boot({ seed: [readyUser()] });
+    expect((await repro(base, "whatever", "usr_test")).status).toBe(503);
+  });
+
+  it("rejects a bad bearer token with 401 before touching anything", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    expect((await repro(base, "wrong", "usr_test")).status).toBe(401);
+    expect(mar.calls).toHaveLength(0);
+  });
+
+  it("404s an unknown user and 409s an agent that is not provisioned", async () => {
+    const { base } = await boot({ seed: [readyUser({ maritimeAgentId: undefined })], adminToken: "adm_secret" });
+    expect((await repro(base, "adm_secret", "usr_missing")).status).toBe(404);
+    expect((await repro(base, "adm_secret", "usr_test")).status).toBe(409);
+  });
+
+  it("recomputes env and pushes the delta without recreating the agent", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    mar.env["agt_42"] = [{ key: "PORT", value: String(MARITIME_AGENT_PORT) }];
+    const res = await repro(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.synced).toBeGreaterThan(0);
+    // It pushed env and cycled the container, never a create/identity call.
+    expect(mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/env"))).toBe(true);
+    expect(body.refreshed).toBe(true);
+    expect(mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/stop"))).toBe(true);
+    expect(mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/start"))).toBe(true);
+    expect(mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/api/agents"))).toBe(false);
+  });
+
+  it("mints the saved Postiz BYOK connection when it is missing and reports its id", async () => {
+    const minted: Array<{ handle: string; toolkit?: string }> = [];
+    const composio = {
+      postizReady: true,
+      ensureAccount: async (handle: string, opts: { toolkit?: string } = {}) => {
+        minted.push({ handle, toolkit: opts.toolkit });
+        return "pca_repro";
+      },
+    } as unknown as ComposioPlatform;
+    const { base, store } = await boot({ seed: [readyUser({ postizKey: "pk_abcdefgh1234" })], adminToken: "adm_secret", composio });
+    const res = await repro(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.postizAccountId).toBe("pca_repro");
+    expect(minted).toEqual([{ handle: "maria", toolkit: "CUSTOM_POSTIZ" }]);
+    expect(store.get("usr_test")?.postizComposioAccountId).toBe("pca_repro");
+  });
+
+  it("reuses an active Postiz connection and reports null when the owner has no key", async () => {
+    const minted: string[] = [];
+    const composio = {
+      postizReady: true,
+      accountActive: async () => true,
+      ensureAccount: async (handle: string) => {
+        minted.push(handle);
+        return "pca_new";
+      },
+    } as unknown as ComposioPlatform;
+    const active = await boot({ seed: [readyUser({ postizKey: "pk_abcdefgh1234", postizComposioAccountId: "pca_live" })], adminToken: "adm_secret", composio });
+    const activeBody = await (await repro(active.base, "adm_secret", "usr_test")).json();
+    expect(activeBody.postizAccountId).toBe("pca_live");
+    expect(minted).toHaveLength(0);
+
+    const without = await boot({ seed: [readyUser()], adminToken: "adm_secret", composio });
+    const withoutBody = await (await repro(without.base, "adm_secret", "usr_test")).json();
+    expect(withoutBody.postizAccountId).toBeNull();
+    expect(minted).toHaveLength(0);
+  });
+});
+
+describe("admin delete user api", () => {
+  function del(base: string, token: string | undefined, userId: string) {
+    return fetch(`${base}/api/admin/users/${userId}`, {
+      method: "DELETE",
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+  }
+
+  it("answers 503 while the admin token is not configured", async () => {
+    const { base, store } = await boot({ seed: [readyUser()] });
+    expect((await del(base, "whatever", "usr_test")).status).toBe(503);
+    expect(store.get("usr_test")).toBeDefined();
+  });
+
+  it("rejects a bad bearer token with 401 before touching anything", async () => {
+    const { base, store, mar, ink } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    const res = await del(base, "wrong", "usr_test");
+    expect(res.status).toBe(401);
+    expect(mar.calls).toHaveLength(0);
+    expect(ink.calls.some((c) => c.startsWith("deleteIdentity"))).toBe(false);
+    expect(store.get("usr_test")).toBeDefined();
+  });
+
+  it("404s an unknown user", async () => {
+    const { base, mar } = await boot({ seed: [], adminToken: "adm_secret" });
+    expect((await del(base, "adm_secret", "usr_missing")).status).toBe(404);
+    expect(mar.calls).toHaveLength(0);
+  });
+
+  it("deletes the Maritime agent and the Inkbox identity, then drops the store record", async () => {
+    const { base, store, mar, ink } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    mar.agentStatus["agt_42"] = "active";
+    const res = await del(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      ok: true,
+      removed: true,
+      identityDeleted: true,
+      agentDeleted: true,
+      identityError: null,
+      agentError: null,
+    });
+    const call = mar.calls.find((c) => c.method === "DELETE");
+    expect(call?.url).toBe("https://maritime.test/api/agents/agt_42");
+    expect(ink.calls).toContain("deleteIdentity maria");
+    expect(store.get("usr_test")).toBeUndefined();
+  });
+
+  it("treats an already-gone Maritime agent as success and still removes the user", async () => {
+    // No agentStatus entry and no existingAgents entry → Maritime answers 404.
+    const { base, store, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    const res = await del(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.removed).toBe(true);
+    expect(body.agentDeleted).toBe(true);
+    expect(mar.calls.find((c) => c.method === "DELETE")?.url).toBe("https://maritime.test/api/agents/agt_42");
+    expect(store.get("usr_test")).toBeUndefined();
+  });
+
+  it("removes the user even when Maritime errors, and reports the error", async () => {
+    const { base, store, mar } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    mar.queue.push(500);
+    const res = await del(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.removed).toBe(true);
+    expect(body.agentDeleted).toBe(false);
+    expect(body.agentError).toMatch(/Maritime 500/);
+    expect(store.get("usr_test")).toBeUndefined();
+  });
+
+  it("removes a user with no agent id without calling Maritime", async () => {
+    const { base, store, mar } = await boot({
+      seed: [readyUser({ maritimeAgentId: undefined })],
+      adminToken: "adm_secret",
+    });
+    const res = await del(base, "adm_secret", "usr_test");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ removed: true, agentDeleted: false, agentError: null });
+    expect(mar.calls).toHaveLength(0);
+    expect(store.get("usr_test")).toBeUndefined();
+  });
+
+  it("rejects non-DELETE methods with 405", async () => {
+    const { base } = await boot({ seed: [readyUser()], adminToken: "adm_secret" });
+    expect((await fetch(`${base}/api/admin/users/usr_test`, { method: "POST" })).status).toBe(405);
+  });
+});
+
+describe("oxygen connect flow", () => {
+  it("sends the browser to Composio's hosted link and records the pending account", async () => {
+    const initiated: Array<{ handle: string; callback: string }> = [];
+    const composio = {
+      oxygenReady: true,
+      initiateOxygenLink: async (handle: string, callback: string) => {
+        initiated.push({ handle, callback });
+        return { redirectUrl: "https://connect.composio.dev/link/ln_o1", accountId: "ca_o1" };
+      },
+    } as unknown as ComposioPlatform;
+    const { base, store } = await boot({ seed: [readyUser()], composio });
+    const res = await fetch(`${base}/connect/usr_test/oxygen`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("https://connect.composio.dev/link/ln_o1");
+    expect(store.get("usr_test")?.oxygenPendingAccountId).toBe("ca_o1");
+    expect(initiated).toEqual([{ handle: "maria", callback: "https://gw.example.com/oauth/composio/callback?user=usr_test" }]);
+  });
+
+  it("503s while the registration never booted and 404s an unknown user", async () => {
+    const { base } = await boot({ seed: [readyUser()] });
+    expect((await fetch(`${base}/connect/usr_test/oxygen`, { redirect: "manual" })).status).toBe(503);
+    expect((await fetch(`${base}/connect/usr_missing/oxygen`, { redirect: "manual" })).status).toBe(404);
+  });
+
+  it("offers the start on the connect page only while ready, and shows the connected state", async () => {
+    const composio = { oxygenReady: true } as unknown as ComposioPlatform;
+    const notReady = await boot({ seed: [readyUser()] });
+    expect(await (await fetch(`${notReady.base}/connect/usr_test`)).text()).not.toContain("/connect/usr_test/oxygen");
+
+    const ready = await boot({ seed: [readyUser()], composio });
+    const readyPage = await (await fetch(`${ready.base}/connect/usr_test`)).text();
+    expect(readyPage).toContain("/connect/usr_test/oxygen");
+
+    const done = await boot({ seed: [readyUser({ oxygenComposioAccountId: "ca_o1" })], composio });
+    const donePage = await (await fetch(`${done.base}/connect/usr_test`)).text();
+    expect(donePage).toContain("Oxygen connected");
+    expect(donePage).not.toContain("/connect/usr_test/oxygen");
+  });
+
+  it("verifies the callback account, saves it, clears the pending id and re-syncs env", async () => {
+    const composio = {
+      oxygenReady: true,
+      connectedAccountInfo: async () => ({ status: "ACTIVE", userId: "maria", toolkit: "custom_oxygen" }),
+    } as unknown as ComposioPlatform;
+    const { base, store, mar } = await boot({ seed: [readyUser({ oxygenPendingAccountId: "ca_o1" })], composio });
+    const res = await fetch(`${base}/oauth/composio/callback?user=usr_test&connectedAccountId=ca_o1`, { redirect: "manual" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/connect/usr_test");
+    const saved = store.get("usr_test");
+    expect(saved?.oxygenComposioAccountId).toBe("ca_o1");
+    expect(saved?.oxygenPendingAccountId).toBeUndefined();
+    // The env push carries custom_oxygen to the agent's toolkit list.
+    await waitFor(() => mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/env")));
+  });
+
+  it("changes nothing when the account belongs to someone else or the wrong toolkit", async () => {
+    const composio = {
+      oxygenReady: true,
+      connectedAccountInfo: async () => ({ status: "ACTIVE", userId: "someone-else", toolkit: "custom_oxygen" }),
+    } as unknown as ComposioPlatform;
+    const { base, store } = await boot({ seed: [readyUser({ oxygenPendingAccountId: "ca_bad" })], composio });
+    const res = await fetch(`${base}/oauth/composio/callback?user=usr_test`, { redirect: "manual" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Oxygen not connected");
+    const u = store.get("usr_test");
+    expect(u?.oxygenComposioAccountId).toBeUndefined();
+    expect(u?.oxygenPendingAccountId).toBe("ca_bad");
+  });
+
+  it("surfaces a Composio error parameter without touching the record", async () => {
+    const { base, store } = await boot({ seed: [readyUser()] });
+    const res = await fetch(`${base}/oauth/composio/callback?user=usr_test&error_description=user%20denied`, { redirect: "manual" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("user denied");
+    expect(store.get("usr_test")?.oxygenComposioAccountId).toBeUndefined();
+  });
+});
+
+describe("connect brain form", () => {
+  function saveBrain(base: string, userId: string, fields: Record<string, string>) {
+    return fetch(`${base}/connect/${userId}`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+      redirect: "manual",
+    });
+  }
+
+  it("saves a repo with a token, keeps the token on re-save, and clears on empty", async () => {
+    const { base, store } = await boot({ seed: [readyUser()] });
+    const id = "usr_test";
+
+    const first = await saveBrain(base, id, { brainRepo: "https://github.com/acme/handbook", brainToken: "ghp_abcdefgh123456" });
+    expect(first.status).toBe(303);
+    expect(first.headers.get("location")).toBe(`/connect/${id}`);
+    expect(store.get(id)).toMatchObject({ brainRepo: "acme/handbook", brainToken: "ghp_abcdefgh123456" });
+
+    // Re-saving the repo with an empty token box must not lose the saved token.
+    const second = await saveBrain(base, id, { brainRepo: "acme/notes" });
+    expect(second.status).toBe(303);
+    expect(store.get(id)).toMatchObject({ brainRepo: "acme/notes", brainToken: "ghp_abcdefgh123456" });
+
+    const page = await (await fetch(`${base}/connect/${id}`)).text();
+    expect(page).toContain("acme/notes");
+    expect(page).not.toContain("ghp_abcdefgh123456");
+
+    const invalid = await saveBrain(base, id, { brainRepo: "not-a-repo" });
+    expect(invalid.status).toBe(400);
+    expect(store.get(id)?.brainRepo).toBe("acme/notes");
+
+    const cleared = await saveBrain(base, id, { brainRepo: "" });
+    expect(cleared.status).toBe(303);
+    expect(store.get(id)?.brainRepo).toBeUndefined();
+    expect(store.get(id)?.brainToken).toBeUndefined();
+  });
+
+  it("answers JSON clients with JSON", async () => {
+    const { base, store } = await boot({ seed: [readyUser()] });
+    const res = await fetch(`${base}/connect/usr_test`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ brainRepo: "acme/handbook" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, hasBrain: true, hasPostizKey: false });
+    expect(store.get("usr_test")?.brainRepo).toBe("acme/handbook");
+  });
+
+  it("saves a Postiz key, keeps it on empty, and clears it via the checkbox", async () => {
+    const { base, store } = await boot({ seed: [readyUser()] });
+    const id = "usr_test";
+
+    const saved = await saveBrain(base, id, { brainRepo: "acme/handbook", postizKey: "pk_abcdefgh1234" });
+    expect(saved.status).toBe(303);
+    expect(store.get(id)?.postizKey).toBe("pk_abcdefgh1234");
+
+    // The key is a secret: never on the page, never in the JSON.
+    const page = await (await fetch(`${base}/connect/${id}`)).text();
+    expect(page).toContain("Postiz key saved");
+    expect(page).not.toContain("pk_abcdefgh1234");
+    expect(page).toContain('name="postizClear"');
+
+    // Re-saving the brain with an empty Postiz box must not lose the key.
+    const kept = await saveBrain(base, id, { brainRepo: "acme/handbook" });
+    expect(kept.status).toBe(303);
+    expect(store.get(id)?.postizKey).toBe("pk_abcdefgh1234");
+
+    const cleared = await saveBrain(base, id, { brainRepo: "acme/handbook", postizClear: "on" });
+    expect(cleared.status).toBe(303);
+    expect(store.get(id)?.postizKey).toBeUndefined();
+  });
+
+  it("rejects an invalid Postiz key without touching the saved one", async () => {
+    const { base, store } = await boot({ seed: [readyUser({ postizKey: "pk_abcdefgh" })] });
+    const invalid = await saveBrain(base, "usr_test", { brainRepo: "acme/handbook", postizKey: "short" });
+    expect(invalid.status).toBe(400);
+    expect(store.get("usr_test")?.postizKey).toBe("pk_abcdefgh");
+  });
+
+  it("mints a Postiz connected account in the background when the key is saved", async () => {
+    const minted: Array<{ handle: string; toolkit?: string }> = [];
+    const composio = {
+      postizReady: true,
+      ensureAccount: async (handle: string, opts: { toolkit?: string } = {}) => {
+        minted.push({ handle, toolkit: opts.toolkit });
+        return "pca_1";
+      },
+    } as unknown as ComposioPlatform;
+    const { base, store } = await boot({ seed: [readyUser()], composio });
+    const res = await saveBrain(base, "usr_test", { brainRepo: "", postizKey: "pk_abcdefgh1234" });
+    expect(res.status).toBe(303);
+    await waitFor(() => minted.length === 1);
+    expect(minted[0]).toMatchObject({ handle: "maria", toolkit: "CUSTOM_POSTIZ" });
+    expect(store.get("usr_test")?.postizComposioAccountId).toBe("pca_1");
+  });
+
+  it("404s an unknown connect id", async () => {
+    const { base } = await boot();
+    expect((await saveBrain(base, "usr_missing", { brainRepo: "acme/handbook" })).status).toBe(404);
+  });
+
+  it("kicks off a GitHub push in the background without holding the response", async () => {
+    const { base, mar } = await boot({ seed: [readyUser()] });
+    const res = await saveBrain(base, "usr_test", { brainRepo: "acme/handbook" });
+    expect(res.status).toBe(303);
+    const until = Date.now() + 2000;
+    while (Date.now() < until && !mar.calls.some((c) => c.url.includes("api.github.com/repos/acme/handbook"))) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(mar.calls.some((c) => c.url.includes("api.github.com/repos/acme/handbook"))).toBe(true);
+  });
+
+  it("stores a brain from signup and exposes hasBrain without leaking the token", async () => {
+    const { base, store } = await boot();
+    const res = await signup(base, {
+      name: "Maria",
+      phone: "415 555 0123",
+      handle: "maria",
+      brainRepo: "acme/handbook",
+      brainToken: "ghp_abcdefgh123456",
+    });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { userId: string };
+    expect(store.get(body.userId)).toMatchObject({ brainRepo: "acme/handbook", brainToken: "ghp_abcdefgh123456" });
+    const pub = (await (await fetch(`${base}/api/users/${body.userId}`)).json()) as Record<string, unknown>;
+    expect(pub["hasBrain"]).toBe(true);
+    expect(pub["brainToken"]).toBeUndefined();
+    expect(pub["brainRepo"]).toBeUndefined();
+    expect(JSON.stringify(pub)).not.toContain("ghp_");
+  });
+
+  it("never echoes the GitHub token back into a failed signup form", async () => {
+    const { base } = await boot();
+    const res = await fetch(`${base}/api/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        name: "Maria",
+        phone: "415 555 0123",
+        handle: "maria",
+        brainRepo: "not-a-repo",
+        brainToken: "ghp_abcdefgh123456",
+      }).toString(),
+    });
+    expect(res.status).toBe(400);
+    const page = await res.text();
+    expect(page).toContain("owner/repo");
+    expect(page).not.toContain("ghp_abcdefgh123456");
   });
 });

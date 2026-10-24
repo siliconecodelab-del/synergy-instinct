@@ -101,7 +101,9 @@ export function fakeInkbox(opts: { subscriptionSigningKey?: string } = {}): Fake
     async createInvitation() {
       return { id: "inv_1" };
     },
-    async deleteIdentity() {},
+    async deleteIdentity(handle: string) {
+      calls.push(`deleteIdentity ${handle}`);
+    },
     // Every subscription is missing call.ended, as one made before the event existed would be.
     async ensureWebhookEvents(subscriptionId: string) {
       calls.push(`ensureWebhookEvents ${subscriptionId}`);
@@ -120,10 +122,14 @@ export interface FakeMaritime {
   existingAgents: Array<{ id: string; externalId: string; projectId?: string }>;
   /** Status answered for GET /api/agents/<id>; ids not listed answer 404. */
   agentStatus: Record<string, string>;
+  /** Env rows per agent id, backing GET/POST /api/agents/<id>/env. */
+  env: Record<string, Array<{ key: string; value: string; isSecret?: boolean }>>;
+  /** When true, POST /api/agents/<id>/start answers 500 (refresh-failure tests). */
+  refreshFails?: boolean;
 }
 
 export function fakeMaritime(): FakeMaritime {
-  const state: FakeMaritime = { calls: [], queue: [], existingAgents: [], agentStatus: {}, fetch: undefined as unknown as typeof fetch };
+  const state: FakeMaritime = { calls: [], queue: [], existingAgents: [], agentStatus: {}, env: {}, fetch: undefined as unknown as typeof fetch };
   state.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -149,6 +155,36 @@ export function fakeMaritime(): FakeMaritime {
       return new Response(JSON.stringify(agent), { status: 201 });
     }
     if (method === "POST" && url.includes("/chat")) return new Response(JSON.stringify({ response: "ok" }), { status: 200 });
+    if (method === "DELETE" && /\/api\/agents\/[^/?]+$/.test(url)) {
+      const id = decodeURIComponent(url.split("/").pop() ?? "");
+      if (!(id in state.agentStatus) && !state.existingAgents.some((a) => a.id === id)) {
+        return new Response(JSON.stringify({ detail: "not found" }), { status: 404 });
+      }
+      delete state.agentStatus[id];
+      state.existingAgents = state.existingAgents.filter((a) => a.id !== id);
+      return new Response(null, { status: 204 });
+    }
+    const cycleMatch = url.match(/\/api\/agents\/([^/?]+)\/(stop|start|restart)$/);
+    if (cycleMatch) {
+      const id = decodeURIComponent(cycleMatch[1] ?? "");
+      const action = cycleMatch[2];
+      if (action === "start" && state.refreshFails) return new Response(JSON.stringify({ detail: "boom" }), { status: 500 });
+      const status = action === "stop" ? "stopped" : "active";
+      state.agentStatus[id] = status;
+      return new Response(JSON.stringify({ id, status }), { status: 200 });
+    }
+    const envMatch = url.match(/\/api\/agents\/([^/?]+)\/env$/);
+    if (envMatch) {
+      const agentId = decodeURIComponent(envMatch[1] ?? "");
+      const rows = (state.env[agentId] ??= []);
+      if (method === "GET") return new Response(JSON.stringify(rows), { status: 200 });
+      if (method === "POST" && body) {
+        const existing = rows.find((r) => r.key === body.key);
+        if (existing) existing.value = body.value;
+        else rows.push({ key: body.key, value: body.value, isSecret: body.isSecret });
+        return new Response(JSON.stringify({ key: body.key, value: body.value, isSecret: body.isSecret }), { status: 201 });
+      }
+    }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
   return state;

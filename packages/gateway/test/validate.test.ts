@@ -1,11 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { normalizeHandle, normalizePhone, secretMatches, validateSignup } from "../src/validate.js";
+import { normalizeHandle, normalizePhone, parseBrainUpdate, parsePostizKeyUpdate, secretMatches, validateSignup } from "../src/validate.js";
 
 describe("validateSignup", () => {
   it("normalizes and accepts a good signup", () => {
     const r = validateSignup({ name: " Maria ", phone: "(415) 555-0123", email: "Maria@Example.com", handle: "@Maria-1" });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value).toEqual({ name: "Maria", phone: "+14155550123", email: "maria@example.com", handle: "maria-1" });
+    if (r.ok) expect(r.value).toEqual({ name: "Maria", phone: "+14155550123", email: "maria@example.com", handle: "maria-1", templateId: "default" });
+  });
+
+  it("accepts a known template id and rejects unknown or malformed ones", () => {
+    const known = ["default", "gtm-ai"];
+    const ok = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", templateId: "gtm-ai" }, { knownTemplates: known });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value.templateId).toBe("gtm-ai");
+
+    const unknown = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", templateId: "nope" }, { knownTemplates: known });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.errors["templateId"]).toMatch(/not available/);
+
+    const traversal = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", template_id: "../etc/passwd" }, { knownTemplates: known });
+    expect(traversal.ok).toBe(false);
+    if (!traversal.ok) expect(traversal.errors["templateId"]).toMatch(/short lowercase/);
   });
 
   it("rejects bad phones, handles and emails with field errors", () => {
@@ -46,5 +61,94 @@ describe("validateSignup", () => {
   it("treats non-string fields as empty", () => {
     const r = validateSignup({ name: 42, phone: null, handle: ["x"] });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("signup brain fields", () => {
+  it("normalizes a repo URL and trims the token", () => {
+    const r = validateSignup({
+      name: "S",
+      phone: "+14155550123",
+      handle: "sam",
+      brainRepo: " https://github.com/acme/handbook/tree/main/docs ",
+      brainToken: " ghp_abcdefgh123456 ",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toMatchObject({ brainRepo: "acme/handbook", brainToken: "ghp_abcdefgh123456" });
+  });
+
+  it("reports brain problems as field errors", () => {
+    const badRepo = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", brainRepo: "just-a-name" });
+    expect(badRepo.ok).toBe(false);
+    if (!badRepo.ok) expect(badRepo.errors["brainRepo"]).toMatch(/owner\/repo/);
+
+    const badToken = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", brainRepo: "acme/handbook", brainToken: "short" });
+    expect(badToken.ok).toBe(false);
+    if (!badToken.ok) expect(badToken.errors["brainToken"]).toBeDefined();
+  });
+
+  it("leaves the brain off when the fields are blank", () => {
+    const r = validateSignup({ name: "S", phone: "+14155550123", handle: "sam", brainRepo: "", brainToken: "" });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.brainRepo).toBeUndefined();
+      expect(r.value.brainToken).toBeUndefined();
+    }
+  });
+});
+
+describe("parseBrainUpdate", () => {
+  it("reads an empty repo as a clear", () => {
+    expect(parseBrainUpdate({ brainRepo: "" })).toEqual({ ok: true, value: { repo: "" } });
+    expect(parseBrainUpdate({})).toEqual({ ok: true, value: { repo: "" } });
+  });
+
+  it("keeps the saved token when the token box is left empty", () => {
+    const r = parseBrainUpdate({ brainRepo: "acme/notes" });
+    expect(r).toEqual({ ok: true, value: { repo: "acme/notes" } });
+  });
+
+  it("takes a new token alongside the repo", () => {
+    const r = parseBrainUpdate({ brain_repo: "acme/notes", brain_token: "ghp_abcdefgh123456" });
+    expect(r).toEqual({ ok: true, value: { repo: "acme/notes", token: "ghp_abcdefgh123456" } });
+  });
+
+  it("rejects a broken repo or token", () => {
+    const repo = parseBrainUpdate({ brainRepo: "not-a-repo" });
+    expect(repo.ok).toBe(false);
+    if (!repo.ok) expect(repo.errors["brainRepo"]).toBeDefined();
+
+    const token = parseBrainUpdate({ brainRepo: "acme/notes", brainToken: "no" });
+    expect(token.ok).toBe(false);
+    if (!token.ok) expect(token.errors["brainToken"]).toBeDefined();
+  });
+});
+
+describe("parsePostizKeyUpdate", () => {
+  it("reads an empty field as keep", () => {
+    expect(parsePostizKeyUpdate({})).toEqual({ ok: true, value: { clear: false } });
+    expect(parsePostizKeyUpdate({ postizKey: "" })).toEqual({ ok: true, value: { clear: false } });
+  });
+
+  it("takes a sane key", () => {
+    expect(parsePostizKeyUpdate({ postizKey: " pk_abcdefgh1234 " })).toEqual({ ok: true, value: { key: "pk_abcdefgh1234", clear: false } });
+  });
+
+  it("reads the clear checkbox, which wins over a pasted key", () => {
+    expect(parsePostizKeyUpdate({ postizClear: "on" })).toEqual({ ok: true, value: { clear: true } });
+    expect(parsePostizKeyUpdate({ postiz_clear: "1" })).toEqual({ ok: true, value: { clear: true } });
+    expect(parsePostizKeyUpdate({ postizKey: "pk_abcdefgh", postizClear: "on" })).toEqual({ ok: true, value: { clear: true } });
+  });
+
+  it("rejects a key that is too short, too long or contains whitespace", () => {
+    const short = parsePostizKeyUpdate({ postizKey: "short" });
+    expect(short.ok).toBe(false);
+    if (!short.ok) expect(short.errors["postizKey"]).toBeDefined();
+
+    const spaces = parsePostizKeyUpdate({ postizKey: "pk_abc defgh" });
+    expect(spaces.ok).toBe(false);
+
+    const long = parsePostizKeyUpdate({ postizKey: "k".repeat(201) });
+    expect(long.ok).toBe(false);
   });
 });

@@ -5,10 +5,13 @@ import { join } from "node:path";
 import { type SignupLimits, SlidingWindowLimiter, clientAddress, pendingCount, signupLimits } from "./limits.js";
 import { type Logger, consoleLogger } from "./logger.js";
 import { GITHUB_URL, type RouterInfo, connectRouterFor, renderConnect, renderLanding, renderLinkDone, renderMessage, renderPending } from "./pages.js";
-import { type LinkPassthrough, type MaritimeProvisionOptions, newUserId, provisionUser } from "./provision.js";
+import { MaritimeApiError, type LinkPassthrough, type MaritimeProvisionOptions, healOxygenAccount, healPostizAccount, maritimeRequest, newUserId, provisionUser, syncAgentEnv } from "./provision.js";
+import { OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG, type ComposioPlatform } from "./composio.js";
+import { pushBrain } from "./brain.js";
 import { EventDeduper, type HeaderMap, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
 import { type UserRecord, type UserStore, publicUser } from "./store.js";
-import { validateSignup } from "./validate.js";
+import { loadTemplateRegistry } from "./templates.js";
+import { parseBrainUpdate, parsePostizKeyUpdate, secretMatches, validateSignup } from "./validate.js";
 
 export interface GatewayOptions {
   store: UserStore;
@@ -22,6 +25,19 @@ export interface GatewayOptions {
   composioApiKey?: string;
   /** Comma-separated Composio toolkits sent with the key. Default gmail,googlecalendar,googlecontacts. */
   composioToolkits?: string;
+  /**
+   * Built executor toolkit platform. Its presence marks the executor as
+   * configured: provisioning connects one account per person (user_id = handle)
+   * and only configured gateways keep `custom_executor` in a template's list.
+   */
+  composio?: ComposioPlatform;
+  /** Fleet-wide GitHub token: fallback for brain pushes when the person supplied none. */
+  githubToken?: string;
+  /**
+   * Bearer token for the admin API (POST /api/admin/desktop/<userId>).
+   * Unset disables the endpoint with 503 — the desktop toggle never ships open.
+   */
+  adminToken?: string;
   /** Stripe Link credentials copied into every agent, with the redirect URI pointing at this gateway. */
   link?: LinkPassthrough;
   logger?: Logger;
@@ -35,6 +51,8 @@ export interface GatewayOptions {
   signupLimits?: Partial<SignupLimits>;
   /** Count signups by X-Forwarded-For instead of the socket address. Only behind a proxy you control. */
   trustProxy?: boolean;
+  /** Directory holding registry/, personas/ and skills/. Default: the templates shipped with the package. */
+  templateDir?: string;
   /**
    * Router info scoped to one user (an identity-key call to Inkbox's triage
    * endpoint). Its QR is shown only when it names the user's handle. Without
@@ -139,6 +157,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
   const maxBody = opts.maxBodyBytes ?? 1024 * 1024;
   const limits = signupLimits(opts.signupLimits);
   const ipLimiter = new SlidingWindowLimiter(limits.perIp, limits.windowMs, now);
+  const templates = loadTemplateRegistry(opts.templateDir);
   let routerCache: { at: number; value: RouterInfo } | undefined;
   const perUserRouter = new Map<string, { at: number; value: RouterInfo }>();
   const inFlight = new Set<string>();
@@ -206,7 +225,10 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       anthropicApiKey: opts.anthropicApiKey,
       composioApiKey: opts.composioApiKey,
       composioToolkits: opts.composioToolkits,
+      composio: opts.composio,
+      githubToken: opts.githubToken,
       link: opts.link,
+      template: templates.get(user.templateId),
       fetchImpl: opts.fetchImpl,
       logger: log,
       userId: user.id,
@@ -249,11 +271,25 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     return `${opts.publicUrl.replace(/\/+$/, "")}/connect/${encodeURIComponent(userId)}`;
   }
 
-  /** Same body for "this phone already has an Instinct" and "you asked again": nothing to learn. */
-  async function respondPending(req: IncomingMessage, res: ServerResponse, handle: string): Promise<void> {
-    if (wantsJson(req)) return json(res, 202, { status: "pending" });
+  /**
+   * Reply when handle+phone both match an existing record: a retry, a crash mid-provision,
+   * or a lost connect page. Only ever reached for the caller's own signup, so the JSON body
+   * carries that record's identity (the deploy edge function attaches it to its own row)
+   * while nothing about anyone else's record is revealed.
+   */
+  async function respondPending(req: IncomingMessage, res: ServerResponse, user: UserRecord): Promise<void> {
+    if (wantsJson(req)) {
+      return json(res, 202, {
+        status: "pending",
+        userId: user.id,
+        connectUrl: connectUrl(user.id),
+        handle: user.handle,
+        templateId: user.templateId,
+        templateName: templates.get(user.templateId)?.title ?? null,
+      });
+    }
     const shared = await routerInfo();
-    return html(res, 202, renderPending(handle, connectRouterFor(handle, shared, undefined)));
+    return html(res, 202, renderPending(user.handle, connectRouterFor(user.handle, shared, undefined)));
   }
 
   async function handleSignup(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -263,11 +299,18 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       return html(res, 503, renderMessage("Signups are closed", "This gateway only relays messages.", "error"));
     }
     const body = parseBody(await readBody(req, 64 * 1024), req.headers["content-type"]);
-    const check = validateSignup(body, { signupSecret: opts.signupSecret });
+    const check = validateSignup(body, { signupSecret: opts.signupSecret, knownTemplates: templates.ids() });
+    // The token is a secret: never echoed back into a rendered form, whatever the outcome.
+    const echoValues = <T extends object>(v: T): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const [k, val] of Object.entries(v)) {
+        if (typeof val === "string" && k !== "inviteCode" && k !== "brainToken" && k !== "brain_token" && k !== "postizKey" && k !== "postiz_key") out[k] = val;
+      }
+      return out;
+    };
     if (!check.ok) {
       if (asJson) return json(res, 400, { error: "invalid signup", errors: check.errors });
-      const values = Object.fromEntries(Object.entries(body).filter(([k, v]) => k !== "inviteCode" && typeof v === "string")) as Record<string, string>;
-      return html(res, 400, renderLanding({ signupEnabled: true, requireInvite: Boolean(opts.signupSecret), errors: check.errors, values }));
+      return html(res, 400, renderLanding({ signupEnabled: true, requireInvite: Boolean(opts.signupSecret), errors: check.errors, values: echoValues(body) }));
     }
     const { value } = check;
 
@@ -278,26 +321,26 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       return html(res, 429, renderMessage("Slow down", "Too many signups from this address. Try again in a few minutes.", "error"));
     }
 
+    // Reuse only ever keys on handle AND phone together: the same person re-submitting
+    // their own details lands on their record, while a fresh handle is a fresh agent —
+    // one owner phone can run a fleet (each platform deploy derives a new handle).
     const byHandle = opts.store.byHandle(value.handle);
-    const byPhone = opts.store.byPhone(value.phone);
     if (byHandle && byHandle.phone === value.phone) {
       // Same person again: a retry after an error, a crash mid-provision, or a lost connect page.
-      if (byHandle.status !== "ready") startProvisioning(byHandle);
+      // Runs for a ready record too — provisionUser's ready branch only re-syncs
+      // env and re-mints a missing Postiz connection; nothing is recreated.
+      startProvisioning(byHandle);
       void opts.notifyExisting?.(byHandle, connectUrl(byHandle.id)).catch((err: unknown) => log.warn("notify.failed", { userId: byHandle.id, error: String(err) }));
-      return respondPending(req, res, value.handle);
+      return respondPending(req, res, byHandle);
     }
     if (byHandle) {
       // Only invitees learn that a handle exists; the open form gets a generic answer.
       if (opts.signupSecret) {
         if (asJson) return json(res, 409, { error: "handle taken", errors: { handle: "That handle is taken." } });
-        return html(res, 409, renderLanding({ signupEnabled: true, requireInvite: true, errors: { handle: "That handle is taken." }, values: { ...value } }));
+        return html(res, 409, renderLanding({ signupEnabled: true, requireInvite: true, errors: { handle: "That handle is taken." }, values: echoValues(value) }));
       }
       if (asJson) return json(res, 400, { error: "could not create" });
-      return html(res, 400, renderLanding({ signupEnabled: true, requireInvite: false, errors: { form: "Could not create an Instinct with these details. Try different ones." }, values: { ...value } }));
-    }
-    if (byPhone) {
-      void opts.notifyExisting?.(byPhone, connectUrl(byPhone.id)).catch((err: unknown) => log.warn("notify.failed", { userId: byPhone.id, error: String(err) }));
-      return respondPending(req, res, value.handle);
+      return html(res, 400, renderLanding({ signupEnabled: true, requireInvite: false, errors: { form: "Could not create an Instinct with these details. Try different ones." }, values: echoValues(value) }));
     }
 
     const pending = pendingCount(opts.store.all(), now(), limits.pendingWindowMs);
@@ -312,19 +355,345 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       name: value.name,
       phone: value.phone,
       ...(value.email ? { email: value.email } : {}),
+      ...(value.brainRepo ? { brainRepo: value.brainRepo } : {}),
+      ...(value.brainToken ? { brainToken: value.brainToken } : {}),
       handle: value.handle,
+      templateId: value.templateId,
       identityId: "",
       identityApiKey: "",
       signingKey: "",
       createdAt: new Date(now()).toISOString(),
       status: "provisioning",
     });
-    log.info("signup.created", { userId: user.id, handle: user.handle });
+    log.info("signup.created", { userId: user.id, handle: user.handle, templateId: user.templateId });
     startProvisioning(user);
 
-    if (asJson) return json(res, 202, { userId: user.id, connectUrl: connectUrl(user.id), status: user.status });
+    if (asJson) {
+      return json(res, 202, {
+        userId: user.id,
+        connectUrl: connectUrl(user.id),
+        status: user.status,
+        templateId: user.templateId,
+        templateName: templates.get(user.templateId)?.title ?? null,
+      });
+    }
     res.writeHead(303, { Location: `/connect/${encodeURIComponent(user.id)}` });
     res.end();
+  }
+
+  /**
+   * POST /api/admin/desktop/<userId> {"enabled": true|false}
+   * Desktop seat toggles for one agent, bearer-protected by GATEWAY_ADMIN_TOKEN.
+   * 503 while unset (endpoint off), 401 on a bad token, 404 unknown user.
+   * Maritime's own constraints (seat cap 402, floor 409/422) pass through as-is.
+   */
+  async function handleAdminDesktop(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
+    if (!opts.adminToken) return json(res, 503, { error: "admin api is not configured" });
+    const auth = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : "";
+    const token = auth.replace(/^Bearer\s+/i, "");
+    if (!secretMatches(token, opts.adminToken)) {
+      log.warn("admin.unauthorized", { path: req.url });
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const user = opts.store.get(userId);
+    if (!user) return json(res, 404, { error: "unknown user" });
+    if (!user.maritimeAgentId) return json(res, 409, { error: "agent is not ready yet" });
+    const body = parseBody(await readBody(req, 8 * 1024), req.headers["content-type"]);
+    const enabled = body["enabled"];
+    if (typeof enabled !== "boolean") return json(res, 400, { error: "enabled must be a boolean" });
+    try {
+      const desktop = await maritimeRequest(
+        { maritime: opts.maritime, fetchImpl: opts.fetchImpl },
+        "PATCH",
+        `/api/agents/${encodeURIComponent(user.maritimeAgentId)}/desktop-config`,
+        { enabled },
+      );
+      log.info("admin.desktop", { userId: user.id, enabled });
+      return json(res, 200, { ok: true, desktop: desktop ?? { enabled } });
+    } catch (err) {
+      if (err instanceof MaritimeApiError) return json(res, err.status, { error: err.detail });
+      throw err;
+    }
+  }
+
+  /**
+   * Full env-sync dependency set (template, readiness flags, secrets) for one
+   * person — used by the admin reprovision endpoint and the Oxygen callback.
+   */
+  function envSyncDeps(user: UserRecord) {
+    return {
+      inkboxBaseUrl: opts.inkboxBaseUrl,
+      maritime: opts.maritime,
+      publicUrl: opts.publicUrl,
+      anthropicApiKey: opts.anthropicApiKey,
+      composioApiKey: opts.composioApiKey,
+      composioToolkits: opts.composioToolkits,
+      composio: opts.composio,
+      link: opts.link,
+      template: templates.get(user.templateId),
+      fetchImpl: opts.fetchImpl,
+      logger: log,
+    };
+  }
+
+  /**
+   * POST /api/admin/reprovision/<userId>
+   * Recompute an agent's env from its template + current readiness, push only
+   * the differing keys to Maritime, and bounce the agent's container
+   * (stop → start) so the store's env is actually applied — store writes
+   * alone never reach an already-deployed container. The agent keeps its id,
+   * identity and connected accounts — nothing is recreated. Bearer-protected
+   * by GATEWAY_ADMIN_TOKEN; 503 while unset, 401 on a bad token, 404 unknown
+   * user.
+   */
+  async function handleAdminReprovision(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
+    if (!opts.adminToken) return json(res, 503, { error: "admin api is not configured" });
+    const auth = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : "";
+    const token = auth.replace(/^Bearer\s+/i, "");
+    if (!secretMatches(token, opts.adminToken)) {
+      log.warn("admin.unauthorized", { path: req.url });
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const user = opts.store.get(userId);
+    if (!user) return json(res, 404, { error: "unknown user" });
+    if (!user.maritimeAgentId) return json(res, 409, { error: "agent is not provisioned yet" });
+    try {
+      // Heal first: both heals can add a toolkit to the env (custom_oxygen via
+      // its account id), so syncing before them would push a stale list.
+      const healedPostiz = await healPostizAccount(user, { composio: opts.composio }, opts.store, log);
+      const healed = await healOxygenAccount(healedPostiz, { composio: opts.composio }, opts.store, log);
+      const result = await syncAgentEnv(healed, envSyncDeps(healed));
+      const summary = {
+        postizAccountId: healed.postizComposioAccountId ?? null,
+        oxygenAccountId: healed.oxygenComposioAccountId ?? null,
+      };
+      log.info("admin.reprovision", { userId: user.id, ...result, ...summary });
+      return json(res, 200, { ok: true, ...result, ...summary });
+    } catch (err) {
+      if (err instanceof MaritimeApiError) return json(res, err.status, { error: err.detail });
+      throw err;
+    }
+  }
+
+  /**
+   * DELETE /api/admin/users/<userId>
+   * Full teardown of one person: best-effort Inkbox identity delete (a 404
+   * counts as already gone), best-effort Maritime agent delete (same), then
+   * drop the record from the store. The store removal is authoritative — a
+   * downstream hiccup is reported in the body, never fatal. Bearer-protected
+   * by GATEWAY_ADMIN_TOKEN; 503 while unset, 401 on a bad token, 404 unknown
+   * user. The Inkbox identity delete is what keeps the fleet's identity cap
+   * free; skipping it would leak a mailbox/number per deleted agent.
+   */
+  async function handleAdminDeleteUser(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
+    if (!opts.adminToken) return json(res, 503, { error: "admin api is not configured" });
+    const auth = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : "";
+    const token = auth.replace(/^Bearer\s+/i, "");
+    if (!secretMatches(token, opts.adminToken)) {
+      log.warn("admin.unauthorized", { path: req.url });
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const user = opts.store.get(userId);
+    if (!user) return json(res, 404, { error: "unknown user" });
+
+    // Best-effort Inkbox teardown. deleteIdentity already treats 404 as done
+    // (mailbox + number + tunnel cascade); anything else is reported, not fatal.
+    let identityDeleted = false;
+    let identityError: string | null = null;
+    if (opts.inkbox) {
+      try {
+        await opts.inkbox.deleteIdentity(user.handle);
+        identityDeleted = true;
+      } catch (err) {
+        identityError = err instanceof Error ? err.message : String(err);
+        log.warn("admin.delete.inkbox_failed", { userId: user.id, handle: user.handle, error: identityError });
+      }
+    }
+
+    // Best-effort Maritime teardown: a 404 means the agent is already gone,
+    // which is success. The caller is deleting the person, not negotiating.
+    let agentDeleted = false;
+    let agentError: string | null = null;
+    if (user.maritimeAgentId) {
+      try {
+        await maritimeRequest(
+          { maritime: opts.maritime, fetchImpl: opts.fetchImpl },
+          "DELETE",
+          `/api/agents/${encodeURIComponent(user.maritimeAgentId)}`,
+        );
+        agentDeleted = true;
+      } catch (err) {
+        if (err instanceof MaritimeApiError && err.status === 404) {
+          agentDeleted = true; // already gone — best-effort success
+        } else {
+          agentError = err instanceof Error ? err.message : String(err);
+          log.warn("admin.delete.maritime_failed", { userId: user.id, agentId: user.maritimeAgentId, error: agentError });
+        }
+      }
+    }
+
+    const removed = opts.store.remove(user.id);
+    log.info("admin.delete", { userId: user.id, handle: user.handle, identityDeleted, agentDeleted, removed });
+    return json(res, 200, { ok: true, removed, identityDeleted, agentDeleted, identityError, agentError });
+  }
+
+  /**
+   * POST /connect/<userId> — the connect page's connections form (brain + Postiz).
+   * Empty repo clears the brain (and its token); an empty token or Postiz key
+   * keeps the saved one; the Postiz checkbox removes it. The brain push and the
+   * Postiz account mint run fire-and-forget (a slow GitHub walk must not hold
+   * the page), and the stored record changes first, so a retry is safe.
+   */
+  async function handleConnectUpdate(req: IncomingMessage, res: ServerResponse, user: UserRecord): Promise<void> {
+    const body = parseBody(await readBody(req, 32 * 1024), req.headers["content-type"]);
+    const check = parseBrainUpdate(body);
+    const postiz = parsePostizKeyUpdate(body);
+    const fail = (errors: Record<string, string>): void => {
+      if (wantsJson(req)) return json(res, 400, { error: "invalid connections", errors });
+      return html(res, 400, renderMessage("Check the form", Object.values(errors).join(" "), "error"));
+    };
+    if (!check.ok) return fail(check.errors);
+    if (!postiz.ok) return fail(postiz.errors);
+    const { repo, token } = check.value;
+
+    let next: UserRecord = { ...user };
+    if (!repo) {
+      delete next.brainRepo;
+      delete next.brainToken;
+      log.info("connect.brain_cleared", { userId: user.id });
+    } else {
+      next.brainRepo = repo;
+      if (token) next.brainToken = token;
+      // Never log the token — only the repo, which is not secret.
+      log.info("connect.brain_saved", { userId: user.id, repo, replacedToken: Boolean(token) });
+    }
+    // The Postiz key is a secret: never logged, never echoed back.
+    if (postiz.value.clear) {
+      delete next.postizKey;
+      delete next.postizComposioAccountId;
+      log.info("connect.postiz_key_cleared", { userId: user.id });
+    } else if (postiz.value.key) {
+      next.postizKey = postiz.value.key;
+      // A new key means the old connection no longer matches; re-mint below.
+      delete next.postizComposioAccountId;
+      log.info("connect.postiz_key_saved", { userId: user.id });
+    }
+    next = opts.store.save(next);
+
+    if (repo && next.maritimeAgentId) {
+      const agentId = next.maritimeAgentId;
+      void pushBrain(repo, next.brainToken, {
+        fetchImpl: opts.fetchImpl,
+        githubToken: opts.githubToken,
+        logger: log,
+        write: async (path, content) => {
+          await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+        },
+      })
+        .then((r) => log.info("connect.brain_pushed", { userId: user.id, repo, ...r }))
+        .catch((err: unknown) => log.warn("connect.brain_failed", { userId: user.id, repo, error: err instanceof Error ? err.message : String(err) }));
+    }
+    // Mint the Postiz connected account carrying this person's own key.
+    if (postiz.value.key && !postiz.value.clear && opts.composio?.postizReady) {
+      const key = postiz.value.key;
+      const handle = next.handle;
+      void opts.composio
+        .ensureAccount(handle, { toolkit: POSTIZ_TOOLKIT_SLUG, apiKey: key })
+        .then((accountId) => {
+          const u = opts.store.get(next.id);
+          if (u && u.postizComposioAccountId !== accountId) opts.store.save({ ...u, postizComposioAccountId: accountId });
+          log.info("connect.postiz_account", { userId: next.id, accountId });
+        })
+        .catch((err: unknown) => log.warn("connect.postiz_account_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) }));
+    }
+
+    if (wantsJson(req)) return json(res, 200, { ok: true, hasBrain: Boolean(next.brainRepo), hasPostizKey: Boolean(next.postizKey) });
+    res.writeHead(303, { Location: `/connect/${encodeURIComponent(user.id)}` });
+    res.end();
+  }
+
+  /**
+   * GET /connect/<userId>/oxygen — start the per-person Oxygen OAuth dance.
+   * Creates the connected account (INITIATED) and Composio's hosted link,
+   * records the pending account id, and sends the browser to the link; the
+   * person approves there (Clerk at the toolkit's issuer) and Composio returns
+   * them to the OAuth callback below.
+   */
+  async function handleOxygenConnect(res: ServerResponse, userId: string): Promise<void> {
+    const user = opts.store.get(userId);
+    if (!user) return html(res, 404, renderMessage("Not found", "No Instinct with that id. Check the link you were given.", "error"));
+    if (!opts.composio?.oxygenReady) {
+      return html(res, 503, renderMessage("Oxygen not ready", "The Oxygen connection cannot start right now. Try again in a minute.", "error"));
+    }
+    try {
+      const callbackUrl = `${opts.publicUrl.replace(/\/+$/, "")}/oauth/composio/callback?user=${encodeURIComponent(user.id)}`;
+      const { redirectUrl, accountId } = await opts.composio.initiateOxygenLink(user.handle, callbackUrl);
+      opts.store.save({ ...user, oxygenPendingAccountId: accountId });
+      log.info("connect.oxygen_initiated", { userId: user.id, accountId });
+      res.writeHead(302, { Location: redirectUrl });
+      res.end();
+    } catch (err) {
+      log.warn("connect.oxygen_initiate_failed", { userId: user.id, error: err instanceof Error ? err.message : String(err) });
+      return html(res, 502, renderMessage("Could not start Oxygen", "Composio did not hand back a connection link. Go back and try once more.", "error"));
+    }
+  }
+
+  /**
+   * GET /oauth/composio/callback?user=<id>[&connectedAccountId=…][&error=…]
+   * Composio returns the browser here after the Oxygen OAuth dance. Verify the
+   * account — ACTIVE, owned by this person's handle, toolkit custom_oxygen —
+   * polling briefly because the redirect can land before the token exchange
+   * finishes; then save it, clear the pending id and re-sync the agent's env so
+   * custom_oxygen enters its toolkit list. Any mismatch changes nothing and
+   * says so; a failure is logged with what Composio actually reported.
+   */
+  async function handleOxygenCallback(res: ServerResponse, query: URLSearchParams): Promise<void> {
+    const user = opts.store.get(query.get("user") ?? "");
+    if (!user) {
+      return html(res, 404, renderMessage("Not found", "This link does not belong to an agent here. Start the connection again from your connect page.", "error"));
+    }
+    const error = query.get("error_description") ?? query.get("error");
+    if (error) {
+      return html(res, 200, renderMessage("Oxygen not connected", `Composio returned: ${error}. Nothing was changed — start again from your connect page.`, "error"));
+    }
+    const candidate = query.get("connectedAccountId") || user.oxygenPendingAccountId || "";
+    if (!candidate || !opts.composio) {
+      return html(res, 200, renderMessage("Oxygen not connected", "There is no connection to verify yet. Start again from your connect page.", "error"));
+    }
+    let info: { status: string; userId: string; toolkit: string } | undefined;
+    for (let i = 0; i < 10; i += 1) {
+      try {
+        info = await opts.composio.connectedAccountInfo(candidate);
+        if (info.status === "ACTIVE") break;
+      } catch {
+        info = undefined; // not visible yet
+      }
+      if (i < 9) await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (info && info.status === "ACTIVE" && info.userId === user.handle && info.toolkit === OXYGEN_TOOLKIT_NAME) {
+      const next: UserRecord = { ...user, oxygenComposioAccountId: candidate };
+      delete next.oxygenPendingAccountId;
+      const saved = opts.store.save(next);
+      log.info("connect.oxygen_connected", { userId: saved.id, accountId: candidate });
+      void syncAgentEnv(saved, envSyncDeps(saved)).catch((err: unknown) =>
+        log.warn("connect.oxygen_env_sync_failed", { userId: saved.id, error: err instanceof Error ? err.message : String(err) }),
+      );
+      res.writeHead(303, { Location: `/connect/${encodeURIComponent(saved.id)}` });
+      res.end();
+      return;
+    }
+    log.warn("connect.oxygen_verify_failed", {
+      userId: user.id,
+      accountId: candidate,
+      status: info?.status ?? "not_found",
+      owner: info?.userId ?? "",
+      toolkit: info?.toolkit ?? "",
+    });
+    return html(
+      res,
+      200,
+      renderMessage("Oxygen not connected", "Composio did not report an active connection. Nothing was changed — start again from your connect page.", "error"),
+    );
   }
 
   async function handleWebhook(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
@@ -390,7 +759,14 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       return html(res, 200, renderLanding({ signupEnabled: Boolean(opts.inkbox), requireInvite: Boolean(opts.signupSecret) }));
     }
     if (parts[0] === "health" && parts.length === 1) {
-      return json(res, 200, { ok: true, users: opts.store.all().length, signup: Boolean(opts.inkbox), github: GITHUB_URL, inbox: inbox.summary() });
+      return json(res, 200, {
+        ok: true,
+        users: opts.store.all().length,
+        signup: Boolean(opts.inkbox),
+        github: GITHUB_URL,
+        inbox: inbox.summary(),
+        templates: templates.ids(),
+      });
     }
     if (parts[0] === "api" && parts[1] === "signup" && parts.length === 2) {
       if (method !== "POST") throw new HttpError(405, "method not allowed");
@@ -402,16 +778,50 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       if (!user) throw new HttpError(404, "unknown user");
       return json(res, 200, { ...publicUser(user), connectUrl: connectUrl(user.id) });
     }
-    if (parts[0] === "connect" && parts.length === 2) {
+    if (parts[0] === "api" && parts[1] === "admin" && parts[2] === "desktop" && parts.length === 4) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      return handleAdminDesktop(req, res, decodeURIComponent(parts[3] ?? ""));
+    }
+    if (parts[0] === "api" && parts[1] === "admin" && parts[2] === "reprovision" && parts.length === 4) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      return handleAdminReprovision(req, res, decodeURIComponent(parts[3] ?? ""));
+    }
+    if (parts[0] === "api" && parts[1] === "admin" && parts[2] === "users" && parts.length === 4) {
+      if (method !== "DELETE") throw new HttpError(405, "method not allowed");
+      return handleAdminDeleteUser(req, res, decodeURIComponent(parts[3] ?? ""));
+    }
+    if (parts[0] === "connect" && parts.length === 3 && parts[2] === "oxygen") {
       if (method !== "GET") throw new HttpError(405, "method not allowed");
+      return handleOxygenConnect(res, decodeURIComponent(parts[1] ?? ""));
+    }
+    if (parts[0] === "connect" && parts.length === 2) {
       const user = opts.store.get(decodeURIComponent(parts[1] ?? ""));
       if (!user) return html(res, 404, renderMessage("Not found", "No Instinct with that id. Check the link you were given.", "error"));
-      const [shared, perUser] = await Promise.all([routerInfo(), routerInfoForUser(user)]);
-      return html(res, 200, renderConnect(user, connectRouterFor(user.handle, shared, perUser)));
+      if (method === "POST") return handleConnectUpdate(req, res, user);
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      // Visiting the page heals a completed-but-uncaptured Oxygen dance (the
+      // browser callback can fail on Composio's side while the account is
+      // already ACTIVE), so the page shows Connected and the env follows.
+      let current = user;
+      if (opts.composio?.oxygenReady && !current.oxygenComposioAccountId && current.oxygenPendingAccountId) {
+        const healed = await healOxygenAccount(current, { composio: opts.composio }, opts.store, log);
+        if (healed.oxygenComposioAccountId) {
+          current = healed;
+          void syncAgentEnv(current, envSyncDeps(current)).catch((err: unknown) =>
+            log.warn("connect.oxygen_env_sync_failed", { userId: current.id, error: err instanceof Error ? err.message : String(err) }),
+          );
+        }
+      }
+      const [shared, perUser] = await Promise.all([routerInfo(), routerInfoForUser(current)]);
+      return html(res, 200, renderConnect(current, connectRouterFor(current.handle, shared, perUser), Boolean(opts.composio?.oxygenReady)));
     }
     if (parts[0] === "webhooks" && parts[1] === "inkbox" && parts.length === 3) {
       if (method !== "POST") throw new HttpError(405, "method not allowed");
       return handleWebhook(req, res, decodeURIComponent(parts[2] ?? ""));
+    }
+    if (parts[0] === "oauth" && parts[1] === "composio" && parts[2] === "callback") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      return handleOxygenCallback(res, url.searchParams);
     }
     if (parts[0] === "oauth" && parts[1] === "link" && parts[2] === "callback" && parts.length === 4) {
       if (method !== "GET") throw new HttpError(405, "method not allowed");

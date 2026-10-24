@@ -1,4 +1,6 @@
 import { InkboxProvisioner } from "@open-instinct/inkbox";
+import { ensureComputersKey } from "./computersKey.js";
+import { ComposioPlatform } from "./composio.js";
 import { consoleLogger } from "./logger.js";
 import type { LinkPassthrough } from "./provision.js";
 import { type GatewayServer, createGateway } from "./server.js";
@@ -34,11 +36,52 @@ export interface GatewayEnv {
   useMaritimeLlm: boolean;
   maritimeModel?: string;
   link?: LinkPassthrough;
+  /** Directory holding registry/, personas/ and skills/. Default: the templates shipped with the package. */
+  templatesDir?: string;
+  /** EXECUTOR_MCP_URL: the self-hosted executor MCP endpoint (Composio custom-toolkit app_url). Unset disables the executor. */
+  executorMcpUrl?: string;
+  /** EXECUTOR_MCP_TOKEN: Bearer sent to the executor on every call. Required with the URL; never forwarded to agents. */
+  executorMcpToken?: string;
+  /** POSTIZ_MCP_URL: MCP wrapper around the self-hosted Postiz public API (Composio custom-toolkit app_url). Unset disables custom_postiz. */
+  postizMcpUrl?: string;
+  /** GATEWAY_ADMIN_TOKEN: bearer for POST /api/admin/desktop/<userId>. Unset disables the endpoint (503). */
+  adminToken?: string;
+  /** MARITIME_COMPUTERS_API_KEY: operator-minted computers-scoped key; wins over the gateway's own mint. */
+  maritimeComputersKey?: string;
+  /** GITHUB_TOKEN: fleet fallback for brain pushes into public repos (a person's token always wins). */
+  githubToken?: string;
 }
 
 function truthy(v: string | undefined): boolean {
   return v !== undefined && /^(1|true|yes)$/i.test(v.trim());
 }
+
+/**
+ * A hung external API must never keep the gateway from listening. On timeout
+ * the boot step is treated as failed (executor off / no hosted computer) —
+ * both are non-fatal states the gateway is designed to run in.
+ */
+function withTimeout<T>(label: string, promise: Promise<T>, ms: number, log: { warn: (event: string, fields: Record<string, unknown>) => void }): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      log.warn(`${label}_timeout`, { effect: "continuing without it", ms });
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+const BOOT_TIMEOUT_MS = 30_000;
 
 /** The only place the gateway reads process.env. Everything else takes options. */
 export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
@@ -78,6 +121,13 @@ export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
     useMaritimeLlm: truthy(env["INSTINCT_USE_MARITIME_LLM"]),
     maritimeModel: env["INSTINCT_MARITIME_MODEL"] || undefined,
     link,
+    templatesDir: env["GATEWAY_TEMPLATES_DIR"] || undefined,
+    executorMcpUrl: env["EXECUTOR_MCP_URL"] || undefined,
+    executorMcpToken: env["EXECUTOR_MCP_TOKEN"] || undefined,
+    postizMcpUrl: env["POSTIZ_MCP_URL"] || undefined,
+    adminToken: env["GATEWAY_ADMIN_TOKEN"] || undefined,
+    maritimeComputersKey: env["MARITIME_COMPUTERS_API_KEY"] || undefined,
+    githubToken: env["GITHUB_TOKEN"] || undefined,
   };
 }
 
@@ -107,7 +157,13 @@ export function agentExtraEnv(cfg: Pick<GatewayEnv, "contextDevApiKey" | "ampleS
   return Object.keys(env).length > 0 ? env : undefined;
 }
 
-export function startGateway(cfg: GatewayEnv): GatewayServer {
+/**
+ * Boot: resolve the narrow computers key and register the executor toolkit
+ * BEFORE accepting signups, so the first agent is provisioned against ready
+ * state. Both failures are non-fatal by design (no hosted computer / no
+ * executor) — each is logged loudly and the gateway still comes up.
+ */
+export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
   const log = consoleLogger;
   const policy = checkSignupPolicy(cfg);
   if (!policy.ok) throw new Error(policy.reason);
@@ -129,6 +185,51 @@ export function startGateway(cfg: GatewayEnv): GatewayServer {
     });
   }
 
+  // Fleet isolation: agents get a narrow computers-scoped key, never the fleet key.
+  const computersKey = await withTimeout(
+    "computers_key",
+    ensureComputersKey({
+      apiKey: cfg.maritimeApiKey,
+      baseUrl: cfg.maritimeBaseUrl,
+      dataDir: cfg.dataDir,
+      override: cfg.maritimeComputersKey,
+      logger: log,
+    }),
+    BOOT_TIMEOUT_MS,
+    log,
+  ).catch(() => undefined);
+  if (computersKey) log.info("computers_key.ready", { source: cfg.maritimeComputersKey ? "override" : "minted" });
+
+  // Composio: each custom toolkit boots independently (executor needs URL+token,
+  // oxygen boots DCR registration, postiz needs the wrapper URL). Linear is
+  // Composio-managed and needs nothing. A boot failure logs loudly per toolkit
+  // and leaves the gateway running without it — template lists that name a
+  // dead custom toolkit are stripped at provision time.
+  let composio: ComposioPlatform | undefined;
+  if (cfg.composioApiKey) {
+    const platform = new ComposioPlatform(
+      {
+        apiKey: cfg.composioApiKey,
+        ...(cfg.executorMcpUrl && cfg.executorMcpToken ? { appUrl: cfg.executorMcpUrl, token: cfg.executorMcpToken } : {}),
+        ...(cfg.postizMcpUrl ? { postizAppUrl: cfg.postizMcpUrl } : {}),
+      },
+      { logger: log },
+    );
+    try {
+      await withTimeout("composio_boot", platform.ensureBoot(), BOOT_TIMEOUT_MS, log);
+    } catch (err) {
+      log.error("composio.boot_failed", {
+        error: err instanceof Error ? err.message : String(err),
+        effect: "agents run without whichever toolkits failed to boot",
+      });
+    }
+    if (platform.anyReady) composio = platform;
+  } else {
+    log.warn("composio.disabled", {
+      reason: "COMPOSIO_API_KEY not set",
+    });
+  }
+
   const server = createGateway({
     store,
     publicUrl: cfg.publicUrl,
@@ -141,20 +242,36 @@ export function startGateway(cfg: GatewayEnv): GatewayServer {
       idleTtlSeconds: cfg.idleTtlSeconds,
       useMaritimeLlm: cfg.useMaritimeLlm,
       maritimeModel: cfg.maritimeModel,
+      computersKey,
       extraEnv: agentExtraEnv(cfg),
     },
     signupSecret: cfg.signupSecret,
     anthropicApiKey: cfg.anthropicApiKey,
     composioApiKey: cfg.composioApiKey,
     composioToolkits: cfg.composioToolkits,
+    composio,
+    githubToken: cfg.githubToken,
+    adminToken: cfg.adminToken,
     link: cfg.link,
     trustProxy: cfg.trustProxy,
+    templateDir: cfg.templatesDir,
     logger: log,
     // The triage endpoint called with an identity-scoped key answers for that identity, so its QR fits the user.
     routerInfoFor: (user) => new InkboxProvisioner({ adminApiKey: user.identityApiKey, baseUrl: cfg.inkboxBaseUrl }).routerInfo(),
   });
   server.listen(cfg.port, "0.0.0.0", () => {
-    log.info("gateway.listening", { port: cfg.port, publicUrl: cfg.publicUrl, users: store.all().length, signup: Boolean(inkbox), link: Boolean(cfg.link) });
+    log.info("gateway.listening", {
+      port: cfg.port,
+      publicUrl: cfg.publicUrl,
+      users: store.all().length,
+      signup: Boolean(inkbox),
+      link: Boolean(cfg.link),
+      executor: Boolean(composio?.executorReady),
+      oxygen: Boolean(composio?.oxygenReady),
+      postiz: Boolean(composio?.postizReady),
+      computer: Boolean(computersKey),
+      adminApi: Boolean(cfg.adminToken),
+    });
     server.resumePending();
     // Older subscriptions were made before call.ended existed; each boot tops them up.
     void server.backfillWebhookEvents();
@@ -174,10 +291,8 @@ export function startGateway(cfg: GatewayEnv): GatewayServer {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
-  try {
-    startGateway(readEnv(process.env));
-  } catch (err) {
+  startGateway(readEnv(process.env)).catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
-  }
+  });
 }
