@@ -11,5 +11,5 @@ export { makeAdapters, type AgentRunAdapterDeps } from "./adapters.js";
 export { runWorkflowWithRecovery, type AgentRunAdapters } from "./runner.js";
 export type { AgentRunResult } from "./types.js";
 export { WorkflowStore } from "./store.js";
-export { agentrunTool } from "./tool.js";
+export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool } from "./tool.js";
 export { createPiAgentRunExtension, type PiExtensionAPI } from "./pi-extension.js";

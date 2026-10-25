@@ -45,7 +45,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -458,12 +458,20 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       now: () => new Date(),
     });
     registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
+    registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
+    registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
       "Use it when a task benefits from checkpoints, structured decisions, recovery, or a sequence of " +
       "tool calls that must be inspected before committing. Workflows run under the same policy guard " +
-      "as your direct tool calls: capabilities, tiers, spend limits, and approvals all apply.",
+      "as your direct tool calls: capabilities, tiers, spend limits, and approvals all apply.\n\n" +
+      "# SOP Authoring\n" +
+      "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
+      "and `sop_check_required_tools` to verify which required apps are connected via Composio. " +
+      "When an SOP lists `required_tools_or_skills`, check their connection status and offer " +
+      "`apps_connect` links for any that are not yet connected. SOPs are written to " +
+      "<data>/Company-brain/SOPs/<department>/<sop_title>.md.",
     );
   }
 
