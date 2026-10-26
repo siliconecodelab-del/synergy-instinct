@@ -1,6 +1,6 @@
 ---
 name: sop-architect
-description: Design, scaffold, validate, and deploy Standard Operating Procedures (SOPs) into the company brain repository. Use when a recurring process needs documentation, or when the user requests a new SOP. Invokes generate_dynamic_sop with sop_title, target_department, execution_classification, core_objective, required_tools_or_skills, and raw_procedural_steps. Also invokes sop_check_required_tools to verify Composio tool connections.
+description: Design, scaffold, validate, and deploy Standard Operating Procedures (SOPs) into the company brain repository. Use when a recurring process needs documentation, or when the user requests a new SOP. Invokes generate_dynamic_sop with sop_title, target_department, execution_classification, core_objective, required_tools_or_skills, and raw_procedural_steps. Also invokes sop_check_required_tools to verify Composio tool connections and sopResearchToolAlternatives to schedule routine tool-alternative research.
 ---
 
 # SOP Architect
@@ -16,6 +16,7 @@ Use this skill when:
 - An existing SOP needs updating or versioning
 - A process needs to be classified by execution type (Manual / Hybrid / Fully_Automated)
 - You need to verify which tools an SOP requires are connected via Composio
+- After creating an SOP, ask the owner if they want routine deep-research on alternative tools for each tool required by the SOP
 
 ## Tools
 
@@ -53,6 +54,22 @@ Check which tools referenced by an existing SOP are connected via Composio, and 
 
 Returns connection status for each required tool and OAuth connect links for tools that are configured but not yet connected.
 
+### sopResearchToolAlternatives
+
+Schedule a weekly deep-research job that checks for alternative tools for each tool required by an SOP, compares them on price, open-source/free availability, and features, and reports back to the owner.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `sop_title` | string | The title of the SOP to research tools for |
+| `target_department` | string | Owning department of the SOP |
+| `schedule_cron` | string | Optional. Cron expression (5 fields: minute hour day month weekday). Default: `"0 9 * * 1"` (Mondays 9am UTC) |
+
+After creating an SOP, ask the owner:
+
+*"Would you like me to routinely research alternative tools for the tools in this SOP? I can check weekly for alternatives, compare them on price, open-source/free availability, and features, and send you a brief summary."*
+
+If the owner says yes, call `sopResearchToolAlternatives` with the SOP's title and department.
+
 ## Output
 
 The SOP is written as a markdown file to:
@@ -75,6 +92,16 @@ When Composio is configured (`COMPOSIO_API_KEY` set):
 2. `sop_check_required_tools` returns OAuth connect links for tools that are configured but not connected
 3. Use `apps_connect` with the toolkit slug to initiate OAuth connection for a missing tool
 4. After connecting, re-run `sop_check_required_tools` to verify all tools are connected
+
+## Routine tool-alternative research
+
+When the owner opts in, `sopResearchToolAlternatives` schedules a weekly job that:
+
+1. Reads each tool required by the SOP
+2. Searches the web for alternatives ("<tool> alternative", "<tool> vs competitors", "<tool> pricing")
+3. Fetches top results and compares on price, open-source/free-tier availability, features, and integration difficulty
+4. Writes a research brief to `workspace/research/sop-<title>-tool-alternatives-<date>.md`
+5. Notifies the owner with a one-paragraph summary per tool
 
 ## Do not
 

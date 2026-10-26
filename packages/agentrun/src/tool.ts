@@ -6,7 +6,7 @@
  * Actions map to `@parcha/agentrun-dsl` operations plus Open Instinct storage.
  */
 import { Type } from "typebox";
-import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry } from "@open-instinct/core";
+import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler } from "@open-instinct/core";
 import {
   inspectWorkflow,
   dryRunWorkflow,
@@ -21,6 +21,7 @@ import {
   validateSOPFrontmatter,
   type ExecutionClassification,
   type ComposioLike,
+  parseSOP,
 } from "./sop-okf.js";
 import {
   writeSOP,
@@ -29,6 +30,7 @@ import {
   checkToolAvailability,
   updateSOPToolStatus,
   getToolConnectLink,
+  kebabCase,
 } from "./sop-generator.js";
 
 function okResult(text: string): ToolResultLike {
@@ -393,6 +395,128 @@ export function sopCheckRequiredToolsTool(deps: {
       }
 
       return okResult(lines.join("\n"));
+    },
+  });
+}
+
+/**
+ * Build the `sopResearchToolAlternatives` RegisteredTool: schedules a weekly
+ * deep-research job that checks for alternative tools for each tool required
+ * by an SOP, compares them on price, open-source/free availability, and
+ * features, and reports back to the owner.
+ */
+export function sopResearchToolAlternativesTool(deps: {
+  stateDir: StateDir;
+}): RegisteredTool {
+  const { stateDir } = deps;
+  const scheduler = new Scheduler(stateDir);
+
+  return defineTool({
+    name: "sopResearchToolAlternatives",
+    label: "Research SOP tool alternatives",
+    description:
+      "Schedule a weekly deep-research job that checks for alternative tools " +
+      "for each tool required by an SOP, compares them on price, open-source/" +
+      "free availability, and features, and reports back to the owner. " +
+      "Parameters: sop_title, target_department, schedule_cron (optional, " +
+      'default "0 9 * * 1" = Mondays 9am).',
+    parameters: Type.Object({
+      sop_title: Type.String({ description: "The title of the SOP to research tools for." }),
+      target_department: Type.String({
+        description: "Owning department of the SOP.",
+      }),
+      schedule_cron: Type.Optional(
+        Type.String({
+          description:
+            "Cron expression for the research schedule (5 fields: minute hour day month weekday). Default: weekly Mondays 9am.",
+        }),
+      ),
+    }),
+    meta: {
+      capabilities: ["converse"],
+      group: "system",
+      describe: (args) =>
+        `sopResearchToolAlternatives ${String((args as { sop_title?: unknown }).sop_title ?? "")}`,
+    },
+    execute: async (args) => {
+      const sopPath = resolveSOPPath(stateDir, args.target_department, args.sop_title);
+      const fs = require("node:fs");
+      if (!fs.existsSync(sopPath)) {
+        return errResult(`SOP not found at ${sopPath}.`);
+      }
+
+      const markdown = fs.readFileSync(sopPath, "utf8");
+      const doc = parseSOP(markdown);
+      if (!doc) {
+        return errResult(`Failed to parse SOP at ${sopPath}.`);
+      }
+
+      const tools = doc.frontmatter.required_tools_or_skills;
+      if (!tools || tools.length === 0) {
+        return errResult(
+          `SOP "${args.sop_title}" has no required tools to research alternatives for.`,
+        );
+      }
+
+      const scheduleCron = args.schedule_cron || "0 9 * * 1";
+      const researchId = `sop-research-${kebabCase(args.sop_title)}-${kebabCase(args.target_department)}`;
+
+      // Save research config
+      const researchConfig = {
+        sop_title: args.sop_title,
+        target_department: args.target_department,
+        tools,
+        schedule_cron: scheduleCron,
+        created_at: new Date().toISOString(),
+      };
+      const configPath = stateDir.path(
+        "agentrun",
+        "sop-research",
+        `${kebabCase(args.target_department)}-${kebabCase(args.sop_title)}.json`,
+      );
+      const configDir = stateDir.path("agentrun", "sop-research");
+      require("node:fs").mkdirSync(configDir, { recursive: true });
+      require("node:fs").writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
+
+      // Create the schedule
+      const schedulePrompt = `
+Research alternative tools for the SOP "${args.sop_title}" (${args.target_department}).
+
+The SOP requires these tools: ${tools.join(", ")}.
+
+For each tool, research:
+1. Alternative/competing tools (2-3 options)
+2. Pricing models and cost comparison
+3. Open-source or free-tier availability
+4. Key features vs the current tool
+5. Integration difficulty
+
+Write a research brief to workspace/research/sop-${kebabCase(args.sop_title)}-tool-alternatives-<date>.md
+with a comparison table and recommendation. Then notify the owner with a short summary
+(one paragraph per tool: current → recommended alternative, key reason, cost impact).
+      `.trim();
+
+      try {
+        scheduler.create({
+          name: researchId,
+          prompt: schedulePrompt,
+          enabled: true,
+          cron: scheduleCron,
+          tz: "UTC",
+        });
+      } catch (err) {
+        return errResult(
+          `Failed to create research schedule: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      return okResult(
+        `Scheduled weekly research for SOP "${args.sop_title}" (${args.target_department}).\n` +
+          `Tools being monitored: ${tools.join(", ")}.\n` +
+          `Schedule: ${scheduleCron} (UTC).\n` +
+          `Research config saved to ${configPath}.\n` +
+          `The agent will research alternatives for each tool and report back with comparisons on price, open-source/free availability, and features.`,
+      );
     },
   });
 }

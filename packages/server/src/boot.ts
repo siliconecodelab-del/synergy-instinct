@@ -23,6 +23,8 @@ import {
   ensurePersona,
   loadConfig,
   ownerClaimStatus,
+  readAgentsInstructions,
+  readPersona,
   syncInstructions,
   loadPolicy,
   resolveDataDir,
@@ -45,7 +47,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -460,6 +462,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
     registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
     registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
+    registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
@@ -473,6 +476,63 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "`apps_connect` links for any that are not yet connected. SOPs are written to " +
       "<data>/Company-brain/SOPs/<department>/<sop_title>.md.",
     );
+  }
+
+  // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).
+  // Exposes the agent's config, persona, instructions and skills so the owner
+  // can save a snapshot as a reusable template.
+  let snapshot: (() => Promise<{
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+  }>) | undefined;
+  let snapshotPush: ((snapshot: {
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+    snapshotAt: string;
+  }) => Promise<void>) | undefined;
+  if (env.INSTINCT_AGENTRUN === "1") {
+    snapshot = async () => {
+      const skills = skillCatalog.list().map((s) => ({
+        name: s.name,
+        description: s.description,
+        visibility: s.visibility,
+      }));
+      return {
+        config,
+        persona: readPersona(state),
+        instructions: readAgentsInstructions(state),
+        skills,
+      };
+    };
+    // Push the snapshot to the gateway on startup so the owner can save it as a template.
+    // The gateway URL is INKBOX_BASE_URL (set during provisioning).
+    const gatewayBaseUrl = env.INKBOX_BASE_URL?.replace(/\/+$/, "");
+    if (gatewayBaseUrl) {
+      const snapshotPushUrl = `${gatewayBaseUrl}/api/agent/snapshot-push`;
+      snapshotPush = async (snap: {
+        config: InstinctConfig;
+        persona?: string;
+        instructions?: string;
+        skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+        snapshotAt: string;
+      }) => {
+        try {
+          await fetch(snapshotPushUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...snap, handle: config.agent.handle }),
+          }).catch(() => undefined);
+        } catch {
+          // fire and forget
+        }
+      };
+      const initialSnap = await snapshot();
+      void snapshotPush({ ...initialSnap, snapshotAt: new Date().toISOString() });
+    }
   }
 
   const stopScheduler = scheduler.start((entry) => runtime.runScheduled(entry));
@@ -526,6 +586,8 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
           },
         }
       : {}),
+    ...(snapshot ? { snapshot } : {}),
+    ...(snapshotPush ? { snapshotPush } : {}),
     async close() {
       stopScheduler();
       sync?.stop();

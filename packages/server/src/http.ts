@@ -60,6 +60,21 @@ export interface HttpApp {
     stateDir: StateDir;
     run: (workflow: unknown, input: Record<string, unknown>, options?: { runId?: string; signal?: AbortSignal }) => Promise<AgentRunResult>;
   };
+  /** Agent snapshot for template creation (optional, INSTINCT_AGENTRUN=1). */
+  snapshot?: () => Promise<{
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+  }>;
+  /** Receive a snapshot pushed by the agent (optional, INSTINCT_AGENTRUN=1). */
+  snapshotPush?: (snapshot: {
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+    snapshotAt: string;
+  }) => Promise<void>;
 }
 
 export interface HttpServerOptions {
@@ -86,7 +101,7 @@ export interface HttpServerOptions {
 
 export const BODY_LIMIT_BYTES = 1024 * 1024;
 export const CHAT_TOKEN_HEADER = "x-instinct-token";
-export const TUNNEL_ROUTES: ReadonlySet<string> = new Set(["GET /health", "POST /webhooks/inkbox"]);
+export const TUNNEL_ROUTES: ReadonlySet<string> = new Set(["GET /health", "POST /webhooks/inkbox", "GET /agent/snapshot"]);
 /** A Maritime schedule wake may arrive a little before the minute boundary we computed. */
 export const SCHEDULE_WAKE_GRACE_MS = 90_000;
 /** Envelope event type the gateway relays when Link redirects to its callback URL. */
@@ -478,6 +493,40 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
     if (app.agentrun && method === "GET" && path === "/agentrun/list") {
       const names = app.agentrun.store.list();
       return sendJson(res, 200, { workflows: names });
+    }
+
+    // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).
+    if (app.snapshot && method === "GET" && path === "/agent/snapshot") {
+      try {
+        const snap = await app.snapshot();
+        return sendJson(res, 200, snap);
+      } catch (err) {
+        log(`agent snapshot failed: ${(err as Error).message}`);
+        return sendJson(res, 500, { error: `snapshot failed: ${(err as Error).message}` });
+      }
+    }
+
+    // Agent pushes its snapshot to the gateway (INSTINCT_AGENTRUN=1).
+    if (app.snapshotPush && method === "POST" && path === "/agent/snapshot-push") {
+      const raw = await readBody(req, limit);
+      if (raw === undefined) return sendJson(res, 413, { error: "body too large" });
+      const body = parseJson(raw);
+      if (!body || typeof body !== "object") {
+        return sendJson(res, 400, { error: "expected JSON snapshot" });
+      }
+      try {
+        await app.snapshotPush(body as {
+          config: InstinctConfig;
+          persona?: string;
+          instructions?: string;
+          skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+          snapshotAt: string;
+        });
+        return sendJson(res, 200, { ok: true });
+      } catch (err) {
+        log(`snapshot push failed: ${(err as Error).message}`);
+        return sendJson(res, 500, { error: `snapshot push failed: ${(err as Error).message}` });
+      }
     }
 
     sendJson(res, 404, { error: "not found" });

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { InkboxProvisioner } from "@open-instinct/inkbox";
+import type { InstinctConfig } from "@open-instinct/core";
 import { DurableInbox } from "@open-instinct/inkbox";
 import { join } from "node:path";
 import { type SignupLimits, SlidingWindowLimiter, clientAddress, pendingCount, signupLimits } from "./limits.js";
@@ -10,7 +11,7 @@ import { OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG, type ComposioPlatform } from 
 import { pushBrain } from "./brain.js";
 import { EventDeduper, type HeaderMap, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
 import { type UserRecord, type UserStore, publicUser } from "./store.js";
-import { loadTemplateRegistry } from "./templates.js";
+import { loadTemplateRegistry, type GatewayTemplate } from "./templates.js";
 import { parseBrainUpdate, parsePostizKeyUpdate, secretMatches, validateSignup } from "./validate.js";
 
 export interface GatewayOptions {
@@ -38,6 +39,10 @@ export interface GatewayOptions {
    * Unset disables the endpoint with 503 — the desktop toggle never ships open.
    */
   adminToken?: string;
+  /** Supabase project URL for verifying JWTs on the snapshot endpoint. */
+  supabaseUrl?: string;
+  /** Supabase service role key for verifying Supabase JWTs. */
+  supabaseServiceRoleKey?: string;
   /** Stripe Link credentials copied into every agent, with the redirect URI pointing at this gateway. */
   link?: LinkPassthrough;
   logger?: Logger;
@@ -125,6 +130,8 @@ function send(res: ServerResponse, status: number, type: string, body: string | 
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   });
   res.end(body);
 }
@@ -161,6 +168,14 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
   let routerCache: { at: number; value: RouterInfo } | undefined;
   const perUserRouter = new Map<string, { at: number; value: RouterInfo }>();
   const inFlight = new Set<string>();
+  /** Agent snapshots keyed by user id. Set when the agent pushes its snapshot. */
+  const agentSnapshots = new Map<string, {
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+    snapshotAt: string;
+  }>();
 
   const relayDeps = {
     maritime: { apiKey: opts.maritime.apiKey, baseUrl: opts.maritime.baseUrl },
@@ -213,9 +228,55 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     }
   }
 
-  function startProvisioning(user: UserRecord): void {
+  function startProvisioning(user: UserRecord, templateConfig?: string): void {
     if (!opts.inkbox || inFlight.has(user.id)) return;
     inFlight.add(user.id);
+    // Build a GatewayTemplate from a user-provided template config (JSON), if any.
+    let template: GatewayTemplate | undefined = templates.get(user.templateId);
+    if (templateConfig) {
+      try {
+        const cfg = JSON.parse(templateConfig);
+        template = {
+          id: `user-template:${user.templateId}`,
+          title: `User Template: ${user.templateId}`,
+          version: "1.0.0",
+          description: "User-created template snapshot",
+          hardware: { cpu: 2, ramGb: 4, desktop: true },
+          ...(cfg.model
+            ? {
+                model: {
+                  provider:
+                    typeof cfg.model.primary === "string"
+                      ? cfg.model.primary.split("/")[0] || "anthropic"
+                      : "anthropic",
+                  default:
+                    typeof cfg.model.primary === "string"
+                      ? cfg.model.primary.split("/")[1] || "claude-fable-5-1"
+                      : "claude-fable-5-1",
+                },
+              }
+            : {}),
+          persona: cfg.persona,
+          instructions: cfg.instructions,
+          skills: (Array.isArray(cfg.skills) ? cfg.skills : []).map((s: any) => ({
+            name: typeof s === "string" ? s : s.name || "",
+            content: "",
+          })),
+          env: {
+            ...(cfg.model?.primary
+              ? { INSTINCT_MODEL: cfg.model.primary }
+              : {}),
+            ...(cfg.apps?.toolkits
+              ? { COMPOSIO_TOOLKITS: Array.isArray(cfg.apps.toolkits)
+                  ? cfg.apps.toolkits.join(",")
+                  : cfg.apps.toolkits }
+              : {}),
+          },
+        };
+      } catch {
+        // Invalid config JSON; fall back to the registry template.
+      }
+    }
     provisionUser(user, {
       inkbox: opts.inkbox,
       inkboxBaseUrl: opts.inkboxBaseUrl,
@@ -228,7 +289,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       composio: opts.composio,
       githubToken: opts.githubToken,
       link: opts.link,
-      template: templates.get(user.templateId),
+      template,
       fetchImpl: opts.fetchImpl,
       logger: log,
       userId: user.id,
@@ -366,7 +427,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       status: "provisioning",
     });
     log.info("signup.created", { userId: user.id, handle: user.handle, templateId: user.templateId });
-    startProvisioning(user);
+    startProvisioning(user, value.templateConfig);
 
     if (asJson) {
       return json(res, 202, {
@@ -754,6 +815,18 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     const parts = url.pathname.split("/").filter(Boolean);
     const method = req.method ?? "GET";
 
+    // Handle CORS preflight requests
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+        "Access-Control-Max-Age": "86400",
+      });
+      res.end();
+      return;
+    }
+
     if (parts.length === 0) {
       if (method !== "GET" && method !== "HEAD") throw new HttpError(405, "method not allowed");
       return html(res, 200, renderLanding({ signupEnabled: Boolean(opts.inkbox), requireInvite: Boolean(opts.signupSecret) }));
@@ -835,6 +908,62 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       const user = handle ? opts.store.byHandle(handle) : undefined;
       if (!user) return html(res, 404, page("Not found", "This link does not belong to an agent here. Start the connection again from your agent.", "error"));
       return handleLinkCallback(res, user.id, url.searchParams);
+    }
+    // Agent snapshot push: the agent POSTs its config, persona, instructions and skills.
+    // Keyed by the agent's handle so the gateway can look it up by user.
+    if (parts[0] === "api" && parts[1] === "agent" && parts[2] === "snapshot-push" && parts.length === 3) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      const body = parseBody(await readBody(req, maxBody), req.headers["content-type"]);
+      const snapHandle = typeof body?.handle === "string" ? body.handle : undefined;
+      const snap = typeof body?.snapshot === "object" && body.snapshot ? body.snapshot : undefined;
+      if (!snapHandle || !snap) {
+        return json(res, 400, { error: "expected { handle, snapshot }" });
+      }
+      agentSnapshots.set(snapHandle, snap as {
+        config: InstinctConfig;
+        persona?: string;
+        instructions?: string;
+        skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+        snapshotAt: string;
+      });
+      log.info("snapshot.pushed", { handle: snapHandle });
+      return json(res, 200, { ok: true });
+    }
+    // Agent snapshot get: returns the stored snapshot for one user.
+    // Bearer token = Supabase JWT, verified with SUPABASE_SERVICE_ROLE_KEY.
+    if (parts[0] === "api" && parts[1] === "agent" && parts[2] === "snapshot" && parts.length === 4) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const targetUserId = decodeURIComponent(parts[3] ?? "");
+      const jwt = typeof req.headers["authorization"] === "string"
+        ? req.headers["authorization"].replace(/^Bearer\s+/i, "")
+        : undefined;
+      if (!jwt) return json(res, 401, { error: "missing bearer token" });
+      if (!opts.supabaseUrl || !opts.supabaseServiceRoleKey) {
+        return json(res, 503, { error: "snapshot endpoint not configured on gateway" });
+      }
+      // Verify the JWT with Supabase.
+      let authedUserId: string | undefined;
+      try {
+        const authRes = await fetch(`${opts.supabaseUrl.replace(/\/+$/, "")}/auth/v1/user`, {
+          headers: { Authorization: `Bearer ${jwt}`, apikey: opts.supabaseServiceRoleKey },
+        });
+        if (!authRes.ok) return json(res, 401, { error: "invalid bearer token" });
+        const authed = (await authRes.json()) as { id?: string };
+        authedUserId = authed.id;
+      } catch {
+        return json(res, 401, { error: "invalid bearer token" });
+      }
+      // The caller can only read their own snapshot.
+      if (authedUserId !== targetUserId) {
+        return json(res, 403, { error: "can only read your own snapshot" });
+      }
+      // Look up the user's handle, then find the snapshot by handle.
+      const user = opts.store.get(targetUserId);
+      const snapHandle = user?.handle;
+      if (!snapHandle) return json(res, 404, { error: "no snapshot stored for this user" });
+      const snap = agentSnapshots.get(snapHandle);
+      if (!snap) return json(res, 404, { error: "no snapshot stored for this user" });
+      return json(res, 200, snap);
     }
     throw new HttpError(404, "not found");
   }

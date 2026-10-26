@@ -12,6 +12,8 @@ export interface SignupValue {
   email?: string;
   handle: string;
   templateId: string;
+  /** JSON-stringified user template config, when deploying from a user template. */
+  templateConfig?: string;
   brainRepo?: string;
   brainToken?: string;
 }
@@ -57,16 +59,25 @@ export function validateSignup(input: Record<string, unknown>, opts: { signupSec
   const handle = normalizeHandle(str(input["handle"]));
   const inviteCode = str(input["inviteCode"] ?? input["invite_code"] ?? input["invite"]);
   const templateId = str(input["templateId"] ?? input["template_id"]) || DEFAULT_TEMPLATE_ID;
+  const templateConfigRaw = str(input["templateConfig"] ?? input["template_config"]);
 
   if (name.length < 1 || name.length > 80) errors["name"] = "Name is required (1 to 80 characters).";
   if (!E164_RE.test(phone)) errors["phone"] = "Phone must be a full number with country code, like +14155550123.";
   if (emailRaw && !isEmail(emailRaw)) errors["email"] = "Email does not look valid.";
   if (!HANDLE_RE.test(handle)) errors["handle"] = "Handle must be 3 to 40 characters: lowercase letters, digits and dashes.";
-  // `owner` names the person behind every agent; core refuses it as a contact handle too.
   else if (isReservedHandle(handle)) errors["handle"] = `"${handle}" is reserved. Pick another handle.`;
   if (opts.signupSecret && !secretMatches(inviteCode, opts.signupSecret)) errors["inviteCode"] = "Invite code is not valid.";
   if (!TEMPLATE_ID_RE.test(templateId)) errors["templateId"] = "Template must be a short lowercase id.";
-  else if (opts.knownTemplates && !opts.knownTemplates.includes(templateId)) errors["templateId"] = "That template is not available on this gateway.";
+  else if (templateId.startsWith("user-template:")) {
+    // User template: skip known-templates check, the edge function resolved it.
+  } else if (opts.knownTemplates && !opts.knownTemplates.includes(templateId)) errors["templateId"] = "That template is not available on this gateway.";
+  if (templateConfigRaw) {
+    try {
+      JSON.parse(templateConfigRaw);
+    } catch {
+      errors["templateConfig"] = "templateConfig must be valid JSON.";
+    }
+  }
 
   const brainRepoRaw = str(input["brainRepo"] ?? input["brain_repo"]);
   const brainTokenRaw = str(input["brainToken"] ?? input["brain_token"]);
@@ -78,6 +89,7 @@ export function validateSignup(input: Record<string, unknown>, opts: { signupSec
   if (Object.keys(errors).length > 0) return { ok: false, errors };
   const value: SignupValue = { name, phone, handle, templateId };
   if (emailRaw) value.email = emailRaw;
+  if (templateConfigRaw) value.templateConfig = templateConfigRaw;
   if (brainRepo) value.brainRepo = brainRepo;
   if (brainToken) value.brainToken = brainToken;
   return { ok: true, value };
