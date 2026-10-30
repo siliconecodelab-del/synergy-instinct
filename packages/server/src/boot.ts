@@ -489,6 +489,9 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "Route/Budget/Catalog/Paths verdicts before trusting it with a task. An AgentRun workflow that " +
       "declares a `preflight.icmRoot` runs this trace first and escalates before any step if a check " +
       "fails.\n\n" +
+      "When the owner speaks in plain language (\"automate X\", \"document X\", \"status\"), use the " +
+      "`pipeline-guide` skill to walk them through SOP -> ICM -> tracer -> DSL with confirmations and " +
+      "compact summaries. Do not make them type technical prompts.\n\n" +
       "# SOP Authoring\n" +
       "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
       "and `sop_check_required_tools` to verify which required apps are connected via Composio. " +
