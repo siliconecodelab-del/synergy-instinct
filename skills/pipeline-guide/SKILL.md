@@ -30,6 +30,11 @@ Map the owner's words to a starting stage. If ambiguous, ask one clarifying ques
 
 ## Auto-advance protocol
 
+For fully automatic runs, use the `pipeline-runner` skill (auto mode) instead of this skill's
+per-stage confirmations. This skill (`pipeline-guide`) is for guided/step-by-step mode.
+
+## Auto-advance protocol (guided mode)
+
 After completing any stage, propose the next step and wait for yes/no/skip:
 
 - SOP done → "SOP created: <path> (<tools>, <classification>). Next: build ICM? (yes/no)"

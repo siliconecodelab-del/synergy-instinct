@@ -33,6 +33,10 @@ import {
   kebabCase,
 } from "./sop-generator.js";
 import { resolveTracerScript, runTracerCommand } from "./workflow-tracer.js";
+import { PipelineStore } from "./pipeline-store.js";
+import { readPipelinePrefs, writePipelinePrefs } from "./pipeline-prefs.js";
+import { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
+import { readNudgeState, writeNudgeState, canNudge } from "./nudge-gate.js";
 
 function okResult(text: string): ToolResultLike {
   return { content: [{ type: "text", text }] };
@@ -559,6 +563,135 @@ export function workflowTraceTool(deps: { stateDir: StateDir }): RegisteredTool 
       const res = await runTracerCommand(script, [a.subcommand, ...cmdArgs]);
       const text = [res.stdout, res.stderr ? `\nSTDERR:\n${res.stderr}` : ""].join("").trim();
       return { content: [{ type: "text", text: text || "(no output)" }], ...(res.code !== 0 ? { isError: true } : {}) };
+    },
+  });
+}
+
+export function pipelineStatusTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const store = new PipelineStore(deps.stateDir);
+  return defineTool({
+    name: "pipeline_status",
+    label: "Pipeline Status",
+    description: "List or inspect persisted pipeline runs. Actions: list, get, bySop.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("bySop")]),
+      id: Type.Optional(Type.String()),
+      sop: Type.Optional(Type.String()),
+    }),
+    meta: { capabilities: ["files.read"], group: "files", describe: (a) => `pipeline_status ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { action: string; id?: string; sop?: string };
+      if (a.action === "list") {
+        const recs = store.list();
+        if (recs.length === 0) return okResult("No pipelines.");
+        const lines = recs.map((r) => {
+          const stages = Object.entries(r.stages).map(([k, v]) => `${k}:${v?.status ?? "?"}`).join(" ");
+          return `${r.id} | ${r.sop} | ${stages} | lastRun=${r.lastRun ?? "never"} | schedule=${r.schedule?.cron ?? "none"}`;
+        });
+        return okResult(lines.join("\n"));
+      }
+      if (a.action === "get") {
+        if (!a.id) return errResult("id is required");
+        const r = store.get(a.id);
+        if (!r) return errResult(`pipeline not found: ${a.id}`);
+        return okResult(JSON.stringify(r, null, 2));
+      }
+      if (a.action === "bySop") {
+        if (!a.sop) return errResult("sop is required");
+        const r = store.bySop(a.sop);
+        if (!r) return errResult(`no pipeline for sop: ${a.sop}`);
+        return okResult(JSON.stringify(r, null, 2));
+      }
+      return errResult("unknown action");
+    },
+  });
+}
+
+export function pipelinePrefsTool(deps: { stateDir: StateDir }): RegisteredTool {
+  return defineTool({
+    name: "pipeline_prefs",
+    label: "Pipeline Preferences",
+    description: "Get or set the owner's pipeline mode (auto or guided). Actions: get, set.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("get"), Type.Literal("set")]),
+      mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("guided")])),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_prefs ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { action: string; mode?: "auto" | "guided" };
+      if (a.action === "get") {
+        return okResult(JSON.stringify(readPipelinePrefs(deps.stateDir)));
+      }
+      if (a.action === "set") {
+        if (!a.mode) return errResult("mode is required (auto|guided)");
+        const p = writePipelinePrefs(deps.stateDir, { mode: a.mode });
+        return okResult(`mode set to ${p.mode}`);
+      }
+      return errResult("unknown action");
+    },
+  });
+}
+
+export function pipelinePresetTool(deps: { stateDir: StateDir }): RegisteredTool {
+  return defineTool({
+    name: "pipeline_preset",
+    label: "Pipeline Preset",
+    description: "List, load, save, or delete pipeline presets. Actions: list, load, save, delete.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("list"), Type.Literal("load"), Type.Literal("save"), Type.Literal("delete")]),
+      name: Type.Optional(Type.String()),
+      preset: Type.Optional(Type.Any()),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_preset ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { action: string; name?: string; preset?: unknown };
+      if (a.action === "list") {
+        const ps = listPresets(deps.stateDir);
+        if (ps.length === 0) return okResult("No presets.");
+        return okResult(ps.map((p) => `${p.name} (${p.department}, ${p.classification}, ${p.tools.join(",")})`).join("\n"));
+      }
+      if (a.action === "load") {
+        if (!a.name) return errResult("name is required");
+        const p = loadPreset(deps.stateDir, a.name);
+        if (!p) return errResult(`preset not found: ${a.name}`);
+        return okResult(JSON.stringify(p, null, 2));
+      }
+      if (a.action === "save") {
+        if (!a.preset || typeof a.preset !== "object") return errResult("preset object is required");
+        const saved = savePreset(deps.stateDir, a.preset as PipelinePreset);
+        return okResult(`saved preset: ${saved.name}`);
+      }
+      if (a.action === "delete") {
+        if (!a.name) return errResult("name is required");
+        const ok = deletePreset(deps.stateDir, a.name);
+        return ok ? okResult(`deleted: ${a.name}`) : errResult(`not found: ${a.name}`);
+      }
+      return errResult("unknown action");
+    },
+  });
+}
+
+export function nudgeGateTool(deps: { stateDir: StateDir }): RegisteredTool {
+  return defineTool({
+    name: "nudge_gate",
+    label: "Nudge Gate",
+    description: "Check whether a proactive nudge may be sent now (quiet hours + daily dedup). Action: check or record.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("check"), Type.Literal("record")]),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `nudge_gate ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { action: string };
+      if (a.action === "check") {
+        const st = readNudgeState(deps.stateDir);
+        const res = canNudge(new Date(), st.lastNudgeAt);
+        return res.allowed ? okResult("allowed") : errResult(`blocked: ${res.reason}`);
+      }
+      if (a.action === "record") {
+        writeNudgeState(deps.stateDir, { lastNudgeAt: new Date().toISOString() });
+        return okResult("recorded");
+      }
+      return errResult("unknown action");
     },
   });
 }

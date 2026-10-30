@@ -48,7 +48,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, nudgeGateTool } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -479,6 +479,10 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
     registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
     registry.register(workflowTraceTool({ stateDir: state }));
+    registry.register(pipelineStatusTool({ stateDir: state }));
+    registry.register(pipelinePrefsTool({ stateDir: state }));
+    registry.register(pipelinePresetTool({ stateDir: state }));
+    registry.register(nudgeGateTool({ stateDir: state }));
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
@@ -492,6 +496,9 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "When the owner speaks in plain language (\"automate X\", \"document X\", \"status\"), use the " +
       "`pipeline-guide` skill to walk them through SOP -> ICM -> tracer -> DSL with confirmations and " +
       "compact summaries. Do not make them type technical prompts.\n\n" +
+      "For fully automatic runs, use the `pipeline-runner` skill (auto mode): it persists pipeline " +
+      "state under /data/Company-brain/pipelines/ and surfaces only 'Run now? (yes/no)' and " +
+      "'Run on a schedule? (yes/no)'.\n\n" +
       "# SOP Authoring\n" +
       "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
       "and `sop_check_required_tools` to verify which required apps are connected via Composio. " +
