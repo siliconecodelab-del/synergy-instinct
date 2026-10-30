@@ -35,7 +35,7 @@ Teaches the agent to:
 **New skill: `skills/pipeline-nudge/SKILL.md`**
 - Owner can say "enable daily nudges" -> agent creates a scheduler job (cron `0 9 * * *`).
 - When the nudge fires, the agent scans `/data/Company-brain/SOPs/` for new SOPs and sends
-  one iMessage per day max: "New SOP found: <title>. Build ICM + test? (yes/no/skip)".
+  one iMessage per day max: "New SOP found: Build ICM + test? (yes/no/skip)".
 - Respects quiet hours (22:00-07:00) and max one nudge per day.
 
 ### C. Status command
