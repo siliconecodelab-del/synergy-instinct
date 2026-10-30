@@ -41,9 +41,20 @@ export interface AgentRunAdapterDeps {
   now?: () => Date;
 }
 
+/** Spec for a tracer-based pre-flight check attached to a workflow. */
+export interface PreflightSpec {
+  /** ICM workspace root to trace. */
+  icmRoot: string;
+  /** Task to trace. Defaults to the workflow's input goal if omitted. */
+  task?: string;
+  /** Output directory for trace artifacts. Defaults to `<state>/agentrun/traces/<runId>`. */
+  outDir?: string;
+}
+
 /** Result of `runWorkflowWithRecovery`. */
 export interface AgentRunResult {
   status: "complete" | "escalated";
   output?: unknown;
-  escalation?: { reason: string; executionPath?: string; state?: Record<string, unknown> };
+  escalation?: { reason: string; executionPath?: string; state?: Record<string, unknown>; checks?: Array<{ name: string; pass: boolean; note: string }> };
+  preflight?: { passed: boolean; htmlPath?: string; checks: Array<{ name: string; pass: boolean; note: string }> };
 }

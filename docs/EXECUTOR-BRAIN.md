@@ -175,6 +175,22 @@ desktop still works. The key lands in every agent's env as
 active in Maritime. They are harmless but accumulate — list keys with the fleet
 key and delete `instinct-computers` entries you do not recognize.
 
+## The two company-brain roots
+
+There are two separate roots on an agent's volume. They are intentionally not
+merged, because their write semantics differ:
+
+| Root | Written by | Semantics | Contents |
+|---|---|---|---|
+| `/data/brain` | Gateway (`pushBrain`) | Bulk mirror of an upstream GitHub repo; refreshed wholesale on provision / connect / reprovision. May overwrite. | Imported handbook, notes, code from the person's GitHub repo. |
+| `/data/Company-brain` | Agent (AgentRun `sop-architect`) | Create-only; refuses to overwrite an existing SOP. | Authored SOPs under `SOPs/<department>/<title>.md`, research briefs. |
+
+Rules of thumb:
+
+- Never put authored SOPs under `/data/brain` — the next brain push can overwrite them.
+- Never treat `/data/Company-brain` as a GitHub mirror — it is local authoring space.
+- The agent's prompt names both roots when they exist so it can route reads/writes correctly.
+
 ## The company brain
 
 A person supplies a GitHub repo (`owner/repo`, a github.com URL, or a URL with

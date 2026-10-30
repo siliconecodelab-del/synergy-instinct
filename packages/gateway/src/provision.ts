@@ -197,6 +197,11 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
     if (env.some((e) => e.key === key)) continue;
     env.push({ key, value, isSecret: SECRET_KEY_RE.test(key) });
   }
+  // AgentRun (SOP architect, workflow engine, snapshot) is on by default so
+  // SOPs land in /data/Company-brain/SOPs and the skill's tools are available.
+  if (!env.some((e) => e.key === "INSTINCT_AGENTRUN")) {
+    env.push({ key: "INSTINCT_AGENTRUN", value: "1", isSecret: false });
+  }
   if (deps.template) applyTemplateEnv(env, deps.template);
   // Gateway-managed toolkits need boot state the agent cannot create itself:
   // a connected account (executor, postiz) or a finished per-person OAuth
@@ -544,6 +549,21 @@ export async function provisionUser(input: ProvisionInput, deps: ProvisionDeps):
     // delta in the background so a reconnect heals it without a recreate.
     // Oxygen heal runs before the sync: custom_oxygen only enters the env once
     // the account id is saved, so syncing first would push a list without it.
+    // The brain is also re-pushed here so a save that failed earlier (or a
+    // repo added after the first provision) lands on the next reconnect.
+    if (user.brainRepo) {
+      const agentId = user.maritimeAgentId;
+      void pushBrain(user.brainRepo, user.brainToken, {
+        fetchImpl: deps.fetchImpl,
+        githubToken: deps.githubToken,
+        logger: log,
+        write: async (path, content) => {
+          await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+        },
+      }).catch((err: unknown) =>
+        log.warn("provision.brain_failed", { userId: user.id, repo: user.brainRepo, error: err instanceof Error ? err.message : String(err) }),
+      );
+    }
     void healPostizAccount(user, deps, store, log);
     void healOxygenAccount(user, deps, store, log)
       .then((next) => syncAgentEnv(next, deps))

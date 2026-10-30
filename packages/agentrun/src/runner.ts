@@ -10,8 +10,9 @@ import { openRecovery, withRecovery, fileStore, type RecoveryDriver } from "@par
 import { runWorkflow, type Workflow, type WorkflowDeps, type WorkflowRunResult } from "@parcha/agentrun-dsl";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentRunResult } from "./types.js";
+import type { AgentRunResult, PreflightSpec } from "./types.js";
 import { makeAdapters } from "./adapters.js";
+import { runPreflight } from "./workflow-tracer.js";
 
 /** Shape of the adapters returned by `makeAdapters`. */
 export type AgentRunAdapters = ReturnType<typeof makeAdapters>;
@@ -53,6 +54,28 @@ export async function runWorkflowWithRecovery(
     signal: options?.signal,
   });
 
+  // Optional tracer-based pre-flight check: if the workflow declares an ICM root,
+  // run the trace first and escalate before any step executes on a failure.
+  const preflight = (workflow as { preflight?: PreflightSpec }).preflight;
+  let preflightResult: { passed: boolean; checks: Array<{ name: string; pass: boolean; note: string }>; htmlPath?: string; reason?: string } | undefined;
+  if (preflight) {
+    const outDir = preflight.outDir ?? stateDir.path("agentrun", "traces", runId);
+    mkdirSync(outDir, { recursive: true });
+    const task = preflight.task ?? String((input as Record<string, unknown>).task ?? (input as Record<string, unknown>).goal ?? "");
+    preflightResult = await runPreflight(preflight.icmRoot, task, outDir);
+    if (!preflightResult.passed) {
+      await driver.close().catch(() => undefined);
+      return {
+        status: "escalated",
+        escalation: {
+          reason: preflightResult.reason ?? "preflight_failed",
+          checks: preflightResult.checks,
+        },
+        preflight: preflightResult,
+      };
+    }
+  }
+
   let result: WorkflowRunResult;
   try {
     result = await runWorkflow(workflow, input, deps);
@@ -61,7 +84,7 @@ export async function runWorkflowWithRecovery(
   }
 
   if (result.status === "complete") {
-    return { status: "complete", output: result.output };
+    return { status: "complete", output: result.output, preflight: preflightResult };
   }
   return {
     status: "escalated",
@@ -69,5 +92,6 @@ export async function runWorkflowWithRecovery(
       reason: (result as { escalation?: { reason?: string } }).escalation?.reason ?? "workflow escalated",
       executionPath: (result as { escalation?: { executionPath?: string } }).escalation?.executionPath,
     },
+    preflight: preflightResult,
   };
 }

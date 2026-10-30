@@ -5,6 +5,7 @@
  * embedders can drive it the same way.
  */
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
@@ -47,7 +48,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -400,6 +401,20 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   skillCatalog.list();
   // Registered even with no skill yet, and even when every skill is hidden: those load by name.
   registry.register(loadSkillTool(skillCatalog.list));
+  // Make the two "company brain" roots discoverable: an imported GitHub mirror
+  // under /data/brain (written by the gateway) and a locally authored store
+  // under /data/Company-brain (SOPs, research). They are intentionally separate.
+  const brainRoots: string[] = [];
+  if (existsSync(state.path("brain"))) brainRoots.push("imported GitHub mirror: /data/brain");
+  if (existsSync(state.path("Company-brain"))) brainRoots.push("locally authored (SOPs, research): /data/Company-brain");
+  if (brainRoots.length > 0) {
+    promptSections.push(
+      "# Company brain roots\n" +
+        "Two separate roots, do not mix their write semantics:\n" +
+        brainRoots.map((r) => "- " + r).join("\n") +
+        "\nGateway-pushed files under /data/brain are a mirror of an upstream GitHub repo and may be refreshed wholesale; never put authored SOPs there. SOPs you author go under /data/Company-brain/SOPs/... (via generate_dynamic_sop when AgentRun is enabled).",
+    );
+  }
   const staticSections = promptSections.join("\n\n");
   // Built per conversation, so each principal's index lists only the skills they may load.
   const skillsPrompt = (principal: Principal) => {
@@ -463,12 +478,17 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
     registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
     registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
+    registry.register(workflowTraceTool({ stateDir: state }));
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +
       "Use it when a task benefits from checkpoints, structured decisions, recovery, or a sequence of " +
       "tool calls that must be inspected before committing. Workflows run under the same policy guard " +
       "as your direct tool calls: capabilities, tiers, spend limits, and approvals all apply.\n\n" +
+      "You also have `workflow_trace` to dry-run an ICM workspace (folder-as-architecture) and report " +
+      "Route/Budget/Catalog/Paths verdicts before trusting it with a task. An AgentRun workflow that " +
+      "declares a `preflight.icmRoot` runs this trace first and escalates before any step if a check " +
+      "fails.\n\n" +
       "# SOP Authoring\n" +
       "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
       "and `sop_check_required_tools` to verify which required apps are connected via Composio. " +

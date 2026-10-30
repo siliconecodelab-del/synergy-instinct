@@ -9,7 +9,8 @@
  */
 export { makeAdapters, type AgentRunAdapterDeps } from "./adapters.js";
 export { runWorkflowWithRecovery, type AgentRunAdapters } from "./runner.js";
-export type { AgentRunResult } from "./types.js";
+export type { AgentRunResult, PreflightSpec } from "./types.js";
+export { resolveTracerScript, runTracerCommand, readTraceResult, runPreflight, type TracerResult, type TracerCheck, type PreflightResult } from "./workflow-tracer.js";
 export { WorkflowStore } from "./store.js";
-export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool } from "./tool.js";
+export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool } from "./tool.js";
 export { createPiAgentRunExtension, type PiExtensionAPI } from "./pi-extension.js";

@@ -32,6 +32,7 @@ import {
   getToolConnectLink,
   kebabCase,
 } from "./sop-generator.js";
+import { resolveTracerScript, runTracerCommand } from "./workflow-tracer.js";
 
 function okResult(text: string): ToolResultLike {
   return { content: [{ type: "text", text }] };
@@ -517,6 +518,47 @@ with a comparison table and recommendation. Then notify the owner with a short s
           `Research config saved to ${configPath}.\n` +
           `The agent will research alternatives for each tool and report back with comparisons on price, open-source/free availability, and features.`,
       );
+    },
+  });
+}
+
+export function workflowTraceTool(deps: { stateDir: StateDir }): RegisteredTool {
+  return defineTool({
+    name: "workflow_trace",
+    label: "Workflow Trace (ICM)",
+    description:
+      "Run a subcommand of the workflow-tracer on an ICM workspace and return its output. " +
+      "Subcommands: tree, read, scan, miss, done, html. Use `tree` first to scan the folder, " +
+      "then `read` for each file the walk opens (with --layer and --why), `scan`/`miss` for " +
+      "searches/dead ends, and `done` to compute the four ICM checks and write trace.html.",
+    parameters: Type.Object({
+      subcommand: Type.Union([
+        Type.Literal("tree"),
+        Type.Literal("read"),
+        Type.Literal("scan"),
+        Type.Literal("miss"),
+        Type.Literal("done"),
+        Type.Literal("html"),
+      ]),
+      args: Type.Array(Type.String(), { default: [] }),
+      dir: Type.Optional(Type.String()),
+    }),
+    meta: {
+      capabilities: ["files.read"],
+      group: "files",
+      describe: (a) => `workflow_trace ${ (a as { subcommand?: string }).subcommand ?? "" }`,
+    },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { subcommand: string; args?: string[]; dir?: string };
+      const script = resolveTracerScript();
+      if (!script) {
+        return { content: [{ type: "text", text: "workflow-tracer script not found (skills/workflow-tracer/scripts/tracer.py)." }], isError: true };
+      }
+      const cmdArgs = [...(a.args ?? [])];
+      if (a.dir) cmdArgs.push("-d", a.dir);
+      const res = await runTracerCommand(script, [a.subcommand, ...cmdArgs]);
+      const text = [res.stdout, res.stderr ? `\nSTDERR:\n${res.stderr}` : ""].join("").trim();
+      return { content: [{ type: "text", text: text || "(no output)" }], ...(res.code !== 0 ? { isError: true } : {}) };
     },
   });
 }

@@ -523,6 +523,22 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       // its account id), so syncing before them would push a stale list.
       const healedPostiz = await healPostizAccount(user, { composio: opts.composio }, opts.store, log);
       const healed = await healOxygenAccount(healedPostiz, { composio: opts.composio }, opts.store, log);
+      // Re-push the company brain so a repo added/changed since provisioning lands.
+      if (healed.brainRepo && healed.maritimeAgentId) {
+        const agentId = healed.maritimeAgentId;
+        try {
+          await pushBrain(healed.brainRepo, healed.brainToken, {
+            fetchImpl: opts.fetchImpl,
+            githubToken: opts.githubToken,
+            logger: log,
+            write: async (path, content) => {
+              await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+            },
+          });
+        } catch (err: unknown) {
+          log.warn("admin.brain_failed", { userId: healed.id, repo: healed.brainRepo, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
       const result = await syncAgentEnv(healed, envSyncDeps(healed));
       const summary = {
         postizAccountId: healed.postizComposioAccountId ?? null,
@@ -641,31 +657,50 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     }
     next = opts.store.save(next);
 
-    if (repo && next.maritimeAgentId) {
+    // Push the brain, mint the Postiz account, then sync the agent's env so the
+    // changes (files + custom_postiz toolkit list) actually reach the container.
+    // Runs in the background so the page responds immediately; a slow GitHub
+    // walk or a Composio hiccup never holds the response.
+    if (next.maritimeAgentId) {
       const agentId = next.maritimeAgentId;
-      void pushBrain(repo, next.brainToken, {
-        fetchImpl: opts.fetchImpl,
-        githubToken: opts.githubToken,
-        logger: log,
-        write: async (path, content) => {
-          await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-        },
-      })
-        .then((r) => log.info("connect.brain_pushed", { userId: user.id, repo, ...r }))
-        .catch((err: unknown) => log.warn("connect.brain_failed", { userId: user.id, repo, error: err instanceof Error ? err.message : String(err) }));
-    }
-    // Mint the Postiz connected account carrying this person's own key.
-    if (postiz.value.key && !postiz.value.clear && opts.composio?.postizReady) {
-      const key = postiz.value.key;
-      const handle = next.handle;
-      void opts.composio
-        .ensureAccount(handle, { toolkit: POSTIZ_TOOLKIT_SLUG, apiKey: key })
-        .then((accountId) => {
-          const u = opts.store.get(next.id);
-          if (u && u.postizComposioAccountId !== accountId) opts.store.save({ ...u, postizComposioAccountId: accountId });
-          log.info("connect.postiz_account", { userId: next.id, accountId });
-        })
-        .catch((err: unknown) => log.warn("connect.postiz_account_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) }));
+      void (async () => {
+        if (repo) {
+          try {
+            const r = await pushBrain(repo, next.brainToken, {
+              fetchImpl: opts.fetchImpl,
+              githubToken: opts.githubToken,
+              logger: log,
+              write: async (path, content) => {
+                await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+              },
+            });
+            log.info("connect.brain_pushed", { userId: user.id, repo, ...r });
+          } catch (err: unknown) {
+            log.warn("connect.brain_failed", { userId: user.id, repo, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        // Mint the Postiz connected account carrying this person's own key.
+        if (postiz.value.key && !postiz.value.clear && opts.composio?.postizReady) {
+          const key = postiz.value.key;
+          try {
+            const accountId = await opts.composio.ensureAccount(next.handle, { toolkit: POSTIZ_TOOLKIT_SLUG, apiKey: key });
+            const u = opts.store.get(next.id);
+            if (u && u.postizComposioAccountId !== accountId) opts.store.save({ ...u, postizComposioAccountId: accountId });
+            log.info("connect.postiz_account", { userId: next.id, accountId });
+          } catch (err: unknown) {
+            log.warn("connect.postiz_account_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        // Heal (reuse-while-active) and sync so the container picks up the new
+        // toolkit list and any rotated key; the bounce is what makes it live.
+        try {
+          const healed = await healPostizAccount(opts.store.get(next.id) ?? next, { composio: opts.composio }, opts.store, log);
+          const latest = opts.store.get(next.id) ?? healed;
+          await syncAgentEnv(latest, envSyncDeps(latest));
+        } catch (err: unknown) {
+          log.warn("connect.env_sync_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) });
+        }
+      })();
     }
 
     if (wantsJson(req)) return json(res, 200, { ok: true, hasBrain: Boolean(next.brainRepo), hasPostizKey: Boolean(next.postizKey) });
