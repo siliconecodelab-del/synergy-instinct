@@ -16,5 +16,6 @@ export { PipelineStore, type PipelineRecord, type PipelineStageRecord, type Pipe
 export { readNudgeState, writeNudgeState, canNudge, type NudgeState, type NudgeCheck } from "./nudge-gate.js";
 export { readPipelinePrefs, writePipelinePrefs, type PipelinePrefs, type PipelineMode } from "./pipeline-prefs.js";
 export { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
-export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, nudgeGateTool } from "./tool.js";
+export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool } from "./tool.js";
+export { icmToDsl, saveDslWorkflow, type IcmToDslResult } from "./icm-to-dsl.js";
 export { createPiAgentRunExtension, type PiExtensionAPI } from "./pi-extension.js";

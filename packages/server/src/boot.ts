@@ -48,7 +48,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, nudgeGateTool } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -482,7 +482,27 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(pipelineStatusTool({ stateDir: state }));
     registry.register(pipelinePrefsTool({ stateDir: state }));
     registry.register(pipelinePresetTool({ stateDir: state }));
+    registry.register(pipelineScheduleTool({ stateDir: state }));
+    registry.register(icmToDslTool({ stateDir: state }));
     registry.register(nudgeGateTool({ stateDir: state }));
+
+    // Code-level migration: import legacy pipeline records from
+    // /data/Company-brain/pipelines/ into the new PipelineStore.
+    const pipelineStore = new PipelineStore(state);
+    const migrated = pipelineStore.migrateLegacyRecords(state);
+    if (migrated.imported > 0) {
+      log(`pipeline migration: imported ${migrated.imported} legacy record(s), skipped ${migrated.skipped}`);
+    }
+
+    // Inject the owner's pipeline mode preference into the AgentRun prompt so
+    // the agent knows whether to auto-advance or confirm per stage.
+    const pipelinePrefs = readPipelinePrefs(state);
+    promptSections.push(
+      `Pipeline mode: ${pipelinePrefs.mode}. ` +
+        `auto = stages run back-to-back with only "Run now? / Run on a schedule?" prompts. ` +
+        `guided = per-stage confirmations. ` +
+        `Change with pipeline_prefs (set mode=auto|guided).\n`,
+    );
     promptSections.push(
       "# AgentRun workflows\n" +
       "You have access to the `agentrun` tool for authoring and running typed, multi-step workflows. " +

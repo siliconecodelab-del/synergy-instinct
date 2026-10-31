@@ -33,7 +33,8 @@ import {
   kebabCase,
 } from "./sop-generator.js";
 import { resolveTracerScript, runTracerCommand } from "./workflow-tracer.js";
-import { PipelineStore } from "./pipeline-store.js";
+import { PipelineStore, type PipelineRecord } from "./pipeline-store.js";
+import { icmToDsl, saveDslWorkflow, type IcmToDslResult } from "./icm-to-dsl.js";
 import { readPipelinePrefs, writePipelinePrefs } from "./pipeline-prefs.js";
 import { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
 import { readNudgeState, writeNudgeState, canNudge } from "./nudge-gate.js";
@@ -572,15 +573,22 @@ export function pipelineStatusTool(deps: { stateDir: StateDir }): RegisteredTool
   return defineTool({
     name: "pipeline_status",
     label: "Pipeline Status",
-    description: "List or inspect persisted pipeline runs. Actions: list, get, bySop.",
+    description: "List, inspect, cancel, or retain persisted pipeline runs. Actions: list, get, bySop, cancel, retention.",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("bySop")]),
+      action: Type.Union([
+        Type.Literal("list"),
+        Type.Literal("get"),
+        Type.Literal("bySop"),
+        Type.Literal("cancel"),
+        Type.Literal("retention"),
+      ]),
       id: Type.Optional(Type.String()),
       sop: Type.Optional(Type.String()),
+      maxAgeDays: Type.Optional(Type.Number({ description: "For retention: max age in days to keep pipelines." })),
     }),
-    meta: { capabilities: ["files.read"], group: "files", describe: (a) => `pipeline_status ${(a as { action?: string }).action ?? ""}` },
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_status ${(a as { action?: string }).action ?? ""}` },
     execute: async (args): Promise<ToolResultLike> => {
-      const a = args as { action: string; id?: string; sop?: string };
+      const a = args as { action: string; id?: string; sop?: string; maxAgeDays?: number };
       if (a.action === "list") {
         const recs = store.list();
         if (recs.length === 0) return okResult("No pipelines.");
@@ -601,6 +609,29 @@ export function pipelineStatusTool(deps: { stateDir: StateDir }): RegisteredTool
         const r = store.bySop(a.sop);
         if (!r) return errResult(`no pipeline for sop: ${a.sop}`);
         return okResult(JSON.stringify(r, null, 2));
+      }
+      if (a.action === "cancel") {
+        if (!a.id) return errResult("id is required");
+        const existing = store.get(a.id);
+        if (!existing) return errResult(`pipeline not found: ${a.id}`);
+        // Mark all incomplete stages as cancelled
+        const next: PipelineRecord = { ...existing, id: existing.id };
+        for (const [stageKey] of Object.entries(next.stages)) {
+          const st = next.stages[stageKey as keyof typeof next.stages];
+          if (st && st.status !== "done" && st.status !== "passed" && st.status !== "failed" && st.status !== "created" && st.status !== "skipped") {
+            st.status = "skipped";
+            st.reason = "cancelled by owner";
+          }
+        }
+        next.lastPrompt = "cancelled";
+        next.updatedAt = new Date().toISOString();
+        store.save(next);
+        return okResult(`Pipeline "${a.id}" cancelled. Incomplete stages skipped.`);
+      }
+      if (a.action === "retention") {
+        const maxAge = a.maxAgeDays ?? 30;
+        const result = store.retention(maxAge);
+        return okResult(`Retention complete: removed ${result.removedPipelines} pipeline(s) older than ${maxAge} day(s).`);
       }
       return errResult("unknown action");
     },
@@ -690,6 +721,103 @@ export function nudgeGateTool(deps: { stateDir: StateDir }): RegisteredTool {
       if (a.action === "record") {
         writeNudgeState(deps.stateDir, { lastNudgeAt: new Date().toISOString() });
         return okResult("recorded");
+      }
+      return errResult("unknown action");
+    },
+  });
+}
+
+/**
+ * Convert an ICM workspace into an AgentRun DSL workflow with preflight wired.
+ * The resulting workflow carries `preflight.icmRoot` so `runWorkflowWithRecovery`
+ * runs the tracer as a mandatory pre-flight before any step executes.
+ */
+export function icmToDslTool(deps: { stateDir: StateDir }): RegisteredTool {
+  return defineTool({
+    name: "icm_to_dsl",
+    label: "ICM to AgentRun DSL",
+    description:
+      "Convert an ICM (folder-as-architecture) workspace into a typed AgentRun DSL " +
+      "workflow. Parameters: icmRoot (path to ICM workspace), name (optional), " +
+      "task (optional trace task). The generated workflow declares preflight.icmRoot " +
+      "so the tracer runs as a mandatory pre-flight check before any step executes.",
+    parameters: Type.Object({
+      icmRoot: Type.String({ description: "Path to the ICM workspace root (contains entry file + stages/)." }),
+      name: Type.Optional(Type.String({ description: "Workflow name (default derived from icmRoot)." })),
+      task: Type.Optional(Type.String({ description: "Trace task for preflight (default: icmRoot path)." })),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `icm_to_dsl ${(a as { icmRoot?: string }).icmRoot ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { icmRoot: string; name?: string; task?: string };
+      if (!a.icmRoot) return errResult("icmRoot is required.");
+      try {
+        const result = icmToDsl(a.icmRoot, { name: a.name, task: a.task });
+        const saved = saveDslWorkflow(deps.stateDir, result);
+        const summary = [
+          `ICM "${a.icmRoot}" converted to AgentRun DSL workflow "${saved.workflow.name}".`,
+          `Entry file: ${result.entryFile || "(none found)"}`,
+          `Stages: ${result.stages.length > 0 ? result.stages.join(", ") : "(none; entry file used as single agent node)"}`,
+          `Preflight: icmRoot=${result.icmRoot} (tracer runs before any step).`,
+          `Workflow saved to: ${saved.path}`,
+        ];
+        return okResult(summary.join("\n"));
+      } catch (err) {
+        return errResult(`ICM→DSL conversion failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  });
+}
+
+/**
+ * Schedule a pipeline run, gated by the nudge gate (quiet hours + daily dedup).
+ */
+export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const store = new PipelineStore(deps.stateDir);
+  return defineTool({
+    name: "pipeline_schedule",
+    label: "Pipeline Schedule",
+    description: "Schedule a pipeline run on a cron. Gated by quiet hours + daily dedup via nudge_gate. Actions: schedule, unschedule, check.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("schedule"), Type.Literal("unschedule"), Type.Literal("check")]),
+      id: Type.Optional(Type.String()),
+      cron: Type.Optional(Type.String({ description: "Cron expression (5 fields). Default: 0 9 * * *." })),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_schedule ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args): Promise<ToolResultLike> => {
+      const a = args as { action: string; id?: string; cron?: string };
+      if (a.action === "check") {
+        const st = readNudgeState(deps.stateDir);
+        const res = canNudge(new Date(), st.lastNudgeAt);
+        return res.allowed ? okResult("allowed") : errResult(`blocked: ${res.reason}`);
+      }
+      if (a.action === "schedule") {
+        if (!a.id) return errResult("id is required.");
+        const existing = store.get(a.id);
+        if (!existing) return errResult(`pipeline not found: ${a.id}`);
+        // Gate: quiet hours + daily dedup
+        const st = readNudgeState(deps.stateDir);
+        const gate = canNudge(new Date(), st.lastNudgeAt);
+        if (!gate.allowed) {
+          return errResult(`Cannot schedule now: ${gate.reason}. Try again outside quiet hours or tomorrow.`);
+        }
+        const cron = a.cron || "0 9 * * *";
+        const jobId = `pipe-${a.id}-${crypto.randomUUID().slice(0, 8)}`;
+        const next: PipelineRecord = { ...existing, id: existing.id };
+        next.schedule = { cron, jobId };
+        next.updatedAt = new Date().toISOString();
+        store.save(next);
+        writeNudgeState(deps.stateDir, { lastNudgeAt: new Date().toISOString() });
+        return okResult(`Pipeline "${a.id}" scheduled: ${cron} (job ${jobId}). Nudge recorded.`);
+      }
+      if (a.action === "unschedule") {
+        if (!a.id) return errResult("id is required.");
+        const existing = store.get(a.id);
+        if (!existing) return errResult(`pipeline not found: ${a.id}`);
+        const next: PipelineRecord = { ...existing, id: existing.id };
+        next.schedule = null;
+        next.updatedAt = new Date().toISOString();
+        store.save(next);
+        return okResult(`Pipeline "${a.id}" unscheduled.`);
       }
       return errResult("unknown action");
     },
