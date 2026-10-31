@@ -31,6 +31,7 @@
     "@open-instinct/inkbox": "workspace:*",
     "@open-instinct/server": "workspace:*",
     "@inkbox/sdk": "^0.7.13",
+    "@parcha/agentrun-dsl": "0.1.0-beta.21",
     "maritime-sdk": "^0.9.0"
   },
   "devDependencies": {

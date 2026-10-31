@@ -1,0 +1,7 @@
+{
+  "name": "calendar-sync",
+  "department": "GTM-playbook",
+  "classification": "Manual",
+  "tools": ["googlecalendar", "gmail"],
+  "steps": "1. Review today's calendar events.\n2. Identify events without agenda or attendees.\n3. Draft reminder emails for event owners.\n4. Send calendar digest to the team."
+}

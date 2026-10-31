@@ -1,0 +1,7 @@
+{
+  "name": "gmail-triage",
+  "department": "GTM-playbook",
+  "classification": "Hybrid",
+  "tools": ["gmail", "notion"],
+  "steps": "1. Check unread Gmail messages.\n2. Label urgent messages from VIPs.\n3. Draft replies to VIP messages.\n4. Archive noise and newsletters.\n5. Log triage summary to Notion."
+}

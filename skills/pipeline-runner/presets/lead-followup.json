@@ -1,0 +1,7 @@
+{
+  "name": "lead-followup",
+  "department": "GTM-playbook",
+  "classification": "Fully_Automated",
+  "tools": ["gmail", "crm"],
+  "steps": "1. Fetch new leads from CRM.\n2. Enrich lead data with public sources.\n3. Draft personalized follow-up emails.\n4. Log email sends back to CRM.\n5. Schedule follow-up tasks for leads not replied within 3 days."
+}

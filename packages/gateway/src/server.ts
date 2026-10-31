@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { InkboxProvisioner } from "@open-instinct/inkbox";
+import type { InstinctConfig } from "@open-instinct/core";
 import { DurableInbox } from "@open-instinct/inkbox";
 import { join } from "node:path";
 import { type SignupLimits, SlidingWindowLimiter, clientAddress, pendingCount, signupLimits } from "./limits.js";
@@ -10,7 +11,7 @@ import { OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG, type ComposioPlatform } from 
 import { pushBrain } from "./brain.js";
 import { EventDeduper, type HeaderMap, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
 import { type UserRecord, type UserStore, publicUser } from "./store.js";
-import { loadTemplateRegistry } from "./templates.js";
+import { loadTemplateRegistry, type GatewayTemplate } from "./templates.js";
 import { parseBrainUpdate, parsePostizKeyUpdate, secretMatches, validateSignup } from "./validate.js";
 
 export interface GatewayOptions {
@@ -38,6 +39,10 @@ export interface GatewayOptions {
    * Unset disables the endpoint with 503 — the desktop toggle never ships open.
    */
   adminToken?: string;
+  /** Supabase project URL for verifying JWTs on the snapshot endpoint. */
+  supabaseUrl?: string;
+  /** Supabase service role key for verifying Supabase JWTs. */
+  supabaseServiceRoleKey?: string;
   /** Stripe Link credentials copied into every agent, with the redirect URI pointing at this gateway. */
   link?: LinkPassthrough;
   logger?: Logger;
@@ -125,6 +130,8 @@ function send(res: ServerResponse, status: number, type: string, body: string | 
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   });
   res.end(body);
 }
@@ -161,6 +168,14 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
   let routerCache: { at: number; value: RouterInfo } | undefined;
   const perUserRouter = new Map<string, { at: number; value: RouterInfo }>();
   const inFlight = new Set<string>();
+  /** Agent snapshots keyed by user id. Set when the agent pushes its snapshot. */
+  const agentSnapshots = new Map<string, {
+    config: InstinctConfig;
+    persona?: string;
+    instructions?: string;
+    skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+    snapshotAt: string;
+  }>();
 
   const relayDeps = {
     maritime: { apiKey: opts.maritime.apiKey, baseUrl: opts.maritime.baseUrl },
@@ -213,9 +228,55 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     }
   }
 
-  function startProvisioning(user: UserRecord): void {
+  function startProvisioning(user: UserRecord, templateConfig?: string): void {
     if (!opts.inkbox || inFlight.has(user.id)) return;
     inFlight.add(user.id);
+    // Build a GatewayTemplate from a user-provided template config (JSON), if any.
+    let template: GatewayTemplate | undefined = templates.get(user.templateId);
+    if (templateConfig) {
+      try {
+        const cfg = JSON.parse(templateConfig);
+        template = {
+          id: `user-template:${user.templateId}`,
+          title: `User Template: ${user.templateId}`,
+          version: "1.0.0",
+          description: "User-created template snapshot",
+          hardware: { cpu: 2, ramGb: 4, desktop: true },
+          ...(cfg.model
+            ? {
+                model: {
+                  provider:
+                    typeof cfg.model.primary === "string"
+                      ? cfg.model.primary.split("/")[0] || "anthropic"
+                      : "anthropic",
+                  default:
+                    typeof cfg.model.primary === "string"
+                      ? cfg.model.primary.split("/")[1] || "claude-fable-5-1"
+                      : "claude-fable-5-1",
+                },
+              }
+            : {}),
+          persona: cfg.persona,
+          instructions: cfg.instructions,
+          skills: (Array.isArray(cfg.skills) ? cfg.skills : []).map((s: any) => ({
+            name: typeof s === "string" ? s : s.name || "",
+            content: "",
+          })),
+          env: {
+            ...(cfg.model?.primary
+              ? { INSTINCT_MODEL: cfg.model.primary }
+              : {}),
+            ...(cfg.apps?.toolkits
+              ? { COMPOSIO_TOOLKITS: Array.isArray(cfg.apps.toolkits)
+                  ? cfg.apps.toolkits.join(",")
+                  : cfg.apps.toolkits }
+              : {}),
+          },
+        };
+      } catch {
+        // Invalid config JSON; fall back to the registry template.
+      }
+    }
     provisionUser(user, {
       inkbox: opts.inkbox,
       inkboxBaseUrl: opts.inkboxBaseUrl,
@@ -228,7 +289,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       composio: opts.composio,
       githubToken: opts.githubToken,
       link: opts.link,
-      template: templates.get(user.templateId),
+      template,
       fetchImpl: opts.fetchImpl,
       logger: log,
       userId: user.id,
@@ -366,7 +427,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       status: "provisioning",
     });
     log.info("signup.created", { userId: user.id, handle: user.handle, templateId: user.templateId });
-    startProvisioning(user);
+    startProvisioning(user, value.templateConfig);
 
     if (asJson) {
       return json(res, 202, {
@@ -462,6 +523,22 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       // its account id), so syncing before them would push a stale list.
       const healedPostiz = await healPostizAccount(user, { composio: opts.composio }, opts.store, log);
       const healed = await healOxygenAccount(healedPostiz, { composio: opts.composio }, opts.store, log);
+      // Re-push the company brain so a repo added/changed since provisioning lands.
+      if (healed.brainRepo && healed.maritimeAgentId) {
+        const agentId = healed.maritimeAgentId;
+        try {
+          await pushBrain(healed.brainRepo, healed.brainToken, {
+            fetchImpl: opts.fetchImpl,
+            githubToken: opts.githubToken,
+            logger: log,
+            write: async (path, content) => {
+              await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+            },
+          });
+        } catch (err: unknown) {
+          log.warn("admin.brain_failed", { userId: healed.id, repo: healed.brainRepo, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
       const result = await syncAgentEnv(healed, envSyncDeps(healed));
       const summary = {
         postizAccountId: healed.postizComposioAccountId ?? null,
@@ -580,31 +657,50 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     }
     next = opts.store.save(next);
 
-    if (repo && next.maritimeAgentId) {
+    // Push the brain, mint the Postiz account, then sync the agent's env so the
+    // changes (files + custom_postiz toolkit list) actually reach the container.
+    // Runs in the background so the page responds immediately; a slow GitHub
+    // walk or a Composio hiccup never holds the response.
+    if (next.maritimeAgentId) {
       const agentId = next.maritimeAgentId;
-      void pushBrain(repo, next.brainToken, {
-        fetchImpl: opts.fetchImpl,
-        githubToken: opts.githubToken,
-        logger: log,
-        write: async (path, content) => {
-          await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-        },
-      })
-        .then((r) => log.info("connect.brain_pushed", { userId: user.id, repo, ...r }))
-        .catch((err: unknown) => log.warn("connect.brain_failed", { userId: user.id, repo, error: err instanceof Error ? err.message : String(err) }));
-    }
-    // Mint the Postiz connected account carrying this person's own key.
-    if (postiz.value.key && !postiz.value.clear && opts.composio?.postizReady) {
-      const key = postiz.value.key;
-      const handle = next.handle;
-      void opts.composio
-        .ensureAccount(handle, { toolkit: POSTIZ_TOOLKIT_SLUG, apiKey: key })
-        .then((accountId) => {
-          const u = opts.store.get(next.id);
-          if (u && u.postizComposioAccountId !== accountId) opts.store.save({ ...u, postizComposioAccountId: accountId });
-          log.info("connect.postiz_account", { userId: next.id, accountId });
-        })
-        .catch((err: unknown) => log.warn("connect.postiz_account_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) }));
+      void (async () => {
+        if (repo) {
+          try {
+            const r = await pushBrain(repo, next.brainToken, {
+              fetchImpl: opts.fetchImpl,
+              githubToken: opts.githubToken,
+              logger: log,
+              write: async (path, content) => {
+                await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+              },
+            });
+            log.info("connect.brain_pushed", { userId: user.id, repo, ...r });
+          } catch (err: unknown) {
+            log.warn("connect.brain_failed", { userId: user.id, repo, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        // Mint the Postiz connected account carrying this person's own key.
+        if (postiz.value.key && !postiz.value.clear && opts.composio?.postizReady) {
+          const key = postiz.value.key;
+          try {
+            const accountId = await opts.composio.ensureAccount(next.handle, { toolkit: POSTIZ_TOOLKIT_SLUG, apiKey: key });
+            const u = opts.store.get(next.id);
+            if (u && u.postizComposioAccountId !== accountId) opts.store.save({ ...u, postizComposioAccountId: accountId });
+            log.info("connect.postiz_account", { userId: next.id, accountId });
+          } catch (err: unknown) {
+            log.warn("connect.postiz_account_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        // Heal (reuse-while-active) and sync so the container picks up the new
+        // toolkit list and any rotated key; the bounce is what makes it live.
+        try {
+          const healed = await healPostizAccount(opts.store.get(next.id) ?? next, { composio: opts.composio }, opts.store, log);
+          const latest = opts.store.get(next.id) ?? healed;
+          await syncAgentEnv(latest, envSyncDeps(latest));
+        } catch (err: unknown) {
+          log.warn("connect.env_sync_failed", { userId: next.id, error: err instanceof Error ? err.message : String(err) });
+        }
+      })();
     }
 
     if (wantsJson(req)) return json(res, 200, { ok: true, hasBrain: Boolean(next.brainRepo), hasPostizKey: Boolean(next.postizKey) });
@@ -754,6 +850,18 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     const parts = url.pathname.split("/").filter(Boolean);
     const method = req.method ?? "GET";
 
+    // Handle CORS preflight requests
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+        "Access-Control-Max-Age": "86400",
+      });
+      res.end();
+      return;
+    }
+
     if (parts.length === 0) {
       if (method !== "GET" && method !== "HEAD") throw new HttpError(405, "method not allowed");
       return html(res, 200, renderLanding({ signupEnabled: Boolean(opts.inkbox), requireInvite: Boolean(opts.signupSecret) }));
@@ -835,6 +943,62 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       const user = handle ? opts.store.byHandle(handle) : undefined;
       if (!user) return html(res, 404, page("Not found", "This link does not belong to an agent here. Start the connection again from your agent.", "error"));
       return handleLinkCallback(res, user.id, url.searchParams);
+    }
+    // Agent snapshot push: the agent POSTs its config, persona, instructions and skills.
+    // Keyed by the agent's handle so the gateway can look it up by user.
+    if (parts[0] === "api" && parts[1] === "agent" && parts[2] === "snapshot-push" && parts.length === 3) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      const body = parseBody(await readBody(req, maxBody), req.headers["content-type"]);
+      const snapHandle = typeof body?.handle === "string" ? body.handle : undefined;
+      const snap = typeof body?.snapshot === "object" && body.snapshot ? body.snapshot : undefined;
+      if (!snapHandle || !snap) {
+        return json(res, 400, { error: "expected { handle, snapshot }" });
+      }
+      agentSnapshots.set(snapHandle, snap as {
+        config: InstinctConfig;
+        persona?: string;
+        instructions?: string;
+        skills: Array<{ name: string; description: string; visibility: "public" | "private" }>;
+        snapshotAt: string;
+      });
+      log.info("snapshot.pushed", { handle: snapHandle });
+      return json(res, 200, { ok: true });
+    }
+    // Agent snapshot get: returns the stored snapshot for one user.
+    // Bearer token = Supabase JWT, verified with SUPABASE_SERVICE_ROLE_KEY.
+    if (parts[0] === "api" && parts[1] === "agent" && parts[2] === "snapshot" && parts.length === 4) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const targetUserId = decodeURIComponent(parts[3] ?? "");
+      const jwt = typeof req.headers["authorization"] === "string"
+        ? req.headers["authorization"].replace(/^Bearer\s+/i, "")
+        : undefined;
+      if (!jwt) return json(res, 401, { error: "missing bearer token" });
+      if (!opts.supabaseUrl || !opts.supabaseServiceRoleKey) {
+        return json(res, 503, { error: "snapshot endpoint not configured on gateway" });
+      }
+      // Verify the JWT with Supabase.
+      let authedUserId: string | undefined;
+      try {
+        const authRes = await fetch(`${opts.supabaseUrl.replace(/\/+$/, "")}/auth/v1/user`, {
+          headers: { Authorization: `Bearer ${jwt}`, apikey: opts.supabaseServiceRoleKey },
+        });
+        if (!authRes.ok) return json(res, 401, { error: "invalid bearer token" });
+        const authed = (await authRes.json()) as { id?: string };
+        authedUserId = authed.id;
+      } catch {
+        return json(res, 401, { error: "invalid bearer token" });
+      }
+      // The caller can only read their own snapshot.
+      if (authedUserId !== targetUserId) {
+        return json(res, 403, { error: "can only read your own snapshot" });
+      }
+      // Look up the user's handle, then find the snapshot by handle.
+      const user = opts.store.get(targetUserId);
+      const snapHandle = user?.handle;
+      if (!snapHandle) return json(res, 404, { error: "no snapshot stored for this user" });
+      const snap = agentSnapshots.get(snapHandle);
+      if (!snap) return json(res, 404, { error: "no snapshot stored for this user" });
+      return json(res, 200, snap);
     }
     throw new HttpError(404, "not found");
   }

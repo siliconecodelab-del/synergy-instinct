@@ -97,7 +97,7 @@ export function errorResult(text: string): ToolResultLike {
 
 /** Find a string field in a tool result: text blocks that parse as JSON, then structuredContent. */
 export function findStringField(result: CallToolResult, field: string): string | undefined {
-  const fromStructured = result.structuredContent?.[field];
+  const fromStructured = isRecord(result.structuredContent) ? result.structuredContent[field] : undefined;
   if (typeof fromStructured === "string") return fromStructured;
   for (const block of result.content) {
     if (block.type !== "text") continue;

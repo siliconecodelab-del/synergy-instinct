@@ -36,6 +36,10 @@ export interface GatewayEnv {
   useMaritimeLlm: boolean;
   maritimeModel?: string;
   link?: LinkPassthrough;
+  /** Supabase project URL for verifying JWTs on the agent snapshot endpoint. */
+  supabaseUrl?: string;
+  /** Supabase service role key for verifying Supabase JWTs. */
+  supabaseServiceRoleKey?: string;
   /** Directory holding registry/, personas/ and skills/. Default: the templates shipped with the package. */
   templatesDir?: string;
   /** EXECUTOR_MCP_URL: the self-hosted executor MCP endpoint (Composio custom-toolkit app_url). Unset disables the executor. */
@@ -103,7 +107,7 @@ export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
     publicUrl,
     dataDir: env["GATEWAY_DATA_DIR"] ?? "./.instinct-gateway",
     inkboxAdminApiKey: env["INKBOX_ADMIN_API_KEY"] || undefined,
-    inkboxBaseUrl: env["INKBOX_BASE_URL"] || undefined,
+    inkboxBaseUrl: env.INKBOX_BASE_URL || (env.NODE_ENV === "production" ? "https://foundersynergy.network" : `http://localhost:${port}`),
     maritimeApiKey,
     maritimeBaseUrl: env["MARITIME_API_URL"] || undefined,
     agentImage: env["INSTINCT_AGENT_IMAGE"] || DEFAULT_AGENT_IMAGE,
@@ -122,6 +126,10 @@ export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
     maritimeModel: env["INSTINCT_MARITIME_MODEL"] || undefined,
     link,
     templatesDir: env["GATEWAY_TEMPLATES_DIR"] || undefined,
+    /** Supabase project URL for verifying JWTs on the agent snapshot endpoint. */
+    supabaseUrl: env["SUPABASE_URL"] || undefined,
+    /** Supabase service role key for verifying Supabase JWTs. */
+    supabaseServiceRoleKey: env["SUPABASE_SERVICE_ROLE_KEY"] || undefined,
     executorMcpUrl: env["EXECUTOR_MCP_URL"] || undefined,
     executorMcpToken: env["EXECUTOR_MCP_TOKEN"] || undefined,
     postizMcpUrl: env["POSTIZ_MCP_URL"] || undefined,
@@ -255,6 +263,8 @@ export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
     link: cfg.link,
     trustProxy: cfg.trustProxy,
     templateDir: cfg.templatesDir,
+    supabaseUrl: cfg.supabaseUrl,
+    supabaseServiceRoleKey: cfg.supabaseServiceRoleKey,
     logger: log,
     // The triage endpoint called with an identity-scoped key answers for that identity, so its QR fits the user.
     routerInfoFor: (user) => new InkboxProvisioner({ adminApiKey: user.identityApiKey, baseUrl: cfg.inkboxBaseUrl }).routerInfo(),
