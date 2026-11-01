@@ -11,8 +11,7 @@ two prompts: "Run now? (yes/no)" and "Run on a schedule? (yes/no)".
 
 ## Pipeline record (backend persistence — PipelineStore)
 
-Every pipeline has a record persisted by `PipelineStore` under `<state>/agentrun/pipelines/<id>.json`
-(legacy records under `/data/Company-brain/pipelines/` are auto-migrated on first use):
+Every pipeline has a record persisted by `PipelineStore` under `<state>/agentrun/pipelines/<id>.json`:
 
 ```json
 {
@@ -38,8 +37,7 @@ Rules:
   says "automate everything").
 - Update the record after every stage. Never lose state.
 - Every save/remove acquires an exclusive per-record lock file (concurrency-safe).
-- Legacy records under `/data/Company-brain/pipelines/` are auto-migrated into `PipelineStore`
-  on first boot.
+
 - On a new chat session, check `PipelineStore.list()` for incomplete records and offer to
   resume from the last successful stage.
 

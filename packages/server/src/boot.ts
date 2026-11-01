@@ -486,13 +486,8 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(icmToDslTool({ stateDir: state }));
     registry.register(nudgeGateTool({ stateDir: state }));
 
-    // Code-level migration: import legacy pipeline records from
-    // /data/Company-brain/pipelines/ into the new PipelineStore.
+    // Code-level pipeline store (no legacy migration; legacy records removed).
     const pipelineStore = new PipelineStore(state);
-    const migrated = pipelineStore.migrateLegacyRecords(state);
-    if (migrated.imported > 0) {
-      log(`pipeline migration: imported ${migrated.imported} legacy record(s), skipped ${migrated.skipped}`);
-    }
 
     // Inject the owner's pipeline mode preference into the AgentRun prompt so
     // the agent knows whether to auto-advance or confirm per stage.
@@ -517,7 +512,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "`pipeline-guide` skill to walk them through SOP -> ICM -> tracer -> DSL with confirmations and " +
       "compact summaries. Do not make them type technical prompts.\n\n" +
       "For fully automatic runs, use the `pipeline-runner` skill (auto mode): it persists pipeline " +
-      "state under /data/Company-brain/pipelines/ and surfaces only 'Run now? (yes/no)' and " +
+      "state under <state>/agentrun/pipelines/ and surfaces only 'Run now? (yes/no)' and " +
       "'Run on a schedule? (yes/no)'.\n\n" +
       "# SOP Authoring\n" +
       "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
@@ -559,8 +554,8 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       };
     };
     // Push the snapshot to the gateway on startup so the owner can save it as a template.
-    // The gateway URL is INKBOX_BASE_URL (set during provisioning).
-    const gatewayBaseUrl = env.INKBOX_BASE_URL?.replace(/\/+$/, "");
+    // The gateway URL is GATEWAY_PUBLIC_URL (set during provisioning).
+    const gatewayBaseUrl = env.GATEWAY_PUBLIC_URL?.replace(/\/+$/, "");
     if (gatewayBaseUrl) {
       const snapshotPushUrl = `${gatewayBaseUrl}/api/agent/snapshot-push`;
       snapshotPush = async (snap: {

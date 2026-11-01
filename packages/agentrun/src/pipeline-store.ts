@@ -45,19 +45,6 @@ export interface PipelineRecord {
   updatedAt: string;
 }
 
-/** Legacy record shape (pre-Store, under /data/Company-brain/pipelines/). */
-export interface LegacyPipelineRecord {
-  id?: string;
-  sop?: string;
-  mode?: string;
-  stages?: Record<string, unknown>;
-  lastPrompt?: string;
-  lastRun?: string | null;
-  schedule?: PipelineSchedule | null;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
 export class PipelineStore {
   readonly dir: string;
 
@@ -94,57 +81,6 @@ export class PipelineStore {
     throw new Error(`could not acquire lock for pipeline ${id} within timeout`);
   }
 
-  /** Migrate legacy pipeline records from /data/Company-brain/pipelines/ into this store. */
-  migrateLegacyRecords(state: StateDir): { imported: number; skipped: number } {
-    const legacyDir = state.path("Company-brain", "pipelines");
-    if (!existsSync(legacyDir)) return { imported: 0, skipped: 0 };
-
-    let imported = 0;
-    let skipped = 0;
-
-    try {
-      const entries = readdirSync(legacyDir).filter((n) => n.endsWith(".json"));
-      for (const name of entries) {
-        try {
-          const raw = readFileSync(join(legacyDir, name), "utf8");
-          const legacy = JSON.parse(raw) as LegacyPipelineRecord;
-          const id = legacy.id || name.replace(/\.json$/, "");
-          const existing = this.get(id);
-          if (existing) {
-            skipped++;
-            continue;
-          }
-          const record: PipelineRecord = {
-            id,
-            sop: legacy.sop || id,
-            mode: (legacy.mode === "guided" ? "guided" : "auto"),
-            stages: {},
-            lastPrompt: legacy.lastPrompt,
-            lastRun: legacy.lastRun ?? null,
-            schedule: legacy.schedule ?? null,
-            createdAt: legacy.createdAt || new Date().toISOString(),
-            updatedAt: legacy.updatedAt || new Date().toISOString(),
-          };
-          // Normalize legacy stages if they exist as a record
-          if (legacy.stages && typeof legacy.stages === "object") {
-            for (const [k, v] of Object.entries(legacy.stages)) {
-              if (k === "sop" || k === "icm" || k === "trace" || k === "dsl") {
-                record.stages[k] = v as PipelineStageRecord;
-              }
-            }
-          }
-          this.save(record);
-          imported++;
-        } catch {
-          skipped++;
-        }
-      }
-    } catch {
-      // legacy dir unreadable; skip migration
-    }
-
-    return { imported, skipped };
-  }
 
   /** Clean up old pipeline records beyond maxAgeDays. Returns count removed. */
   retention(maxAgeDays: number): { removedPipelines: number } {

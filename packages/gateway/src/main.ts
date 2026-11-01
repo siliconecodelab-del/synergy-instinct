@@ -107,7 +107,7 @@ export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
     publicUrl,
     dataDir: env["GATEWAY_DATA_DIR"] ?? "./.instinct-gateway",
     inkboxAdminApiKey: env["INKBOX_ADMIN_API_KEY"] || undefined,
-    inkboxBaseUrl: env.INKBOX_BASE_URL || (env.NODE_ENV === "production" ? "https://foundersynergy.network" : `http://localhost:${port}`),
+    inkboxBaseUrl: env.INKBOX_BASE_URL || (env.NODE_ENV === "production" ? "https://inkbox.ai" : `http://localhost:${port}`),
     maritimeApiKey,
     maritimeBaseUrl: env["MARITIME_API_URL"] || undefined,
     agentImage: env["INSTINCT_AGENT_IMAGE"] || DEFAULT_AGENT_IMAGE,

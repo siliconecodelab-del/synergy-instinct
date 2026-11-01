@@ -174,6 +174,7 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
     { key: "INSTINCT_OWNER_PHONE", value: user.phone, isSecret: false },
   ];
   if (deps.inkboxBaseUrl) env.push({ key: "INKBOX_BASE_URL", value: deps.inkboxBaseUrl, isSecret: false });
+  if (deps.publicUrl) env.push({ key: "GATEWAY_PUBLIC_URL", value: deps.publicUrl.replace(/\/+$/, ""), isSecret: false });
   if (user.email) env.push({ key: "INSTINCT_OWNER_EMAIL", value: user.email, isSecret: false });
   if (deps.anthropicApiKey) env.push({ key: "ANTHROPIC_API_KEY", value: deps.anthropicApiKey, isSecret: true });
   if (deps.composioApiKey) {
