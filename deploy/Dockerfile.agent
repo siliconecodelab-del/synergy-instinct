@@ -42,6 +42,7 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY packages ./packages
+COPY skills ./skills
 RUN pnpm --filter @open-instinct/core build \
   && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
@@ -50,13 +51,9 @@ FROM base AS runtime
 ENV NODE_ENV=production \
     INSTINCT_DATA_DIR=/data \
     INSTINCT_SKILLS_DIR=/app/skills
-RUN groupadd --system instinct \
-  && useradd --system --gid instinct --uid 10001 --create-home --home-dir /home/instinct --shell /usr/sbin/nologin instinct \
-  && mkdir -p /data \
-  && chown instinct:instinct /data \
-  && chmod 0750 /data
-COPY --from=build --chown=instinct:instinct /app /app
-COPY --chown=instinct:instinct deploy/entrypoint.sh /app/deploy/entrypoint.sh
+COPY --from=build /app /app
+COPY skills ./skills
+COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
 RUN chmod 0755 /app/deploy/entrypoint.sh
 VOLUME ["/data"]
 # Documentation only: the real port is $PORT at runtime (see the note at the top).
