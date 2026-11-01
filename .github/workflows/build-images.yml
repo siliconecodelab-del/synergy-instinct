@@ -48,12 +48,17 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push agent image
+      - name: Build and push image
         run: |
+          TAGS=${{ steps.meta.outputs.tags }}
+          TAG_ARGS=""
+          for tag in $TAGS; do
+            TAG_ARGS="$TAG_ARGS --tag $tag"
+          done
           docker buildx build \
             --file ${{ matrix.image.dockerfile }} \
             --platform linux/amd64,linux/arm64 \
-            --tag ${{ steps.meta.outputs.tags }} \
+            $TAG_ARGS \
             --push \
             --progress=plain \
             .
