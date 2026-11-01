@@ -24,10 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lowercase owner for GHCR
-        id: owner
-        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -40,7 +36,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.image.name }}
+          images: ghcr.io/${{ github.repository_owner }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -48,15 +44,11 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push image
+      - name: Build and push ${{ matrix.image.name }}
         run: |
-          TAGS=${{ steps.meta.outputs.tags }}
-          for tag in $TAGS; do
-            docker buildx build \
-              --file ${{ matrix.image.dockerfile }} \
-              --platform linux/amd64 \
-              --tag $tag \
-              --push \
-              --progress=plain \
-              .
-          done
+          TAG=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:${{ steps.meta.outputs.version }}
+          docker build \
+            --file ${{ matrix.image.dockerfile }} \
+            --tag $TAG \
+            .
+          docker push $TAG
