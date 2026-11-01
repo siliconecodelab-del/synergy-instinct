@@ -43,7 +43,8 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS build
 COPY packages ./packages
 COPY skills ./skills
-RUN pnpm -r --filter './packages/*' run build \
+RUN pnpm --filter @open-instinct/core build \
+  && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
 
 FROM base AS runtime

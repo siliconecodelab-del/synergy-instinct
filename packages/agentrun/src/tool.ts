@@ -553,7 +553,7 @@ export function workflowTraceTool(deps: { stateDir: StateDir }): RegisteredTool 
       group: "files",
       describe: (a) => `workflow_trace ${ (a as { subcommand?: string }).subcommand ?? "" }`,
     },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { subcommand: string; args?: string[]; dir?: string };
       const script = resolveTracerScript();
       if (!script) {
@@ -587,7 +587,7 @@ export function pipelineStatusTool(deps: { stateDir: StateDir }): RegisteredTool
       maxAgeDays: Type.Optional(Type.Number({ description: "For retention: max age in days to keep pipelines." })),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_status ${(a as { action?: string }).action ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { action: string; id?: string; sop?: string; maxAgeDays?: number };
       if (a.action === "list") {
         const recs = store.list();
@@ -648,7 +648,7 @@ export function pipelinePrefsTool(deps: { stateDir: StateDir }): RegisteredTool 
       mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("guided")])),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_prefs ${(a as { action?: string }).action ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { action: string; mode?: "auto" | "guided" };
       if (a.action === "get") {
         return okResult(JSON.stringify(readPipelinePrefs(deps.stateDir)));
@@ -674,7 +674,7 @@ export function pipelinePresetTool(deps: { stateDir: StateDir }): RegisteredTool
       preset: Type.Optional(Type.Any()),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_preset ${(a as { action?: string }).action ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { action: string; name?: string; preset?: unknown };
       if (a.action === "list") {
         const ps = listPresets(deps.stateDir);
@@ -711,7 +711,7 @@ export function nudgeGateTool(deps: { stateDir: StateDir }): RegisteredTool {
       action: Type.Union([Type.Literal("check"), Type.Literal("record")]),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `nudge_gate ${(a as { action?: string }).action ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { action: string };
       if (a.action === "check") {
         const st = readNudgeState(deps.stateDir);
@@ -747,7 +747,7 @@ export function icmToDslTool(deps: { stateDir: StateDir }): RegisteredTool {
       task: Type.Optional(Type.String({ description: "Trace task for preflight (default: icmRoot path)." })),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `icm_to_dsl ${(a as { icmRoot?: string }).icmRoot ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { icmRoot: string; name?: string; task?: string };
       if (!a.icmRoot) return errResult("icmRoot is required.");
       try {
@@ -783,7 +783,7 @@ export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTo
       cron: Type.Optional(Type.String({ description: "Cron expression (5 fields). Default: 0 9 * * *." })),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `pipeline_schedule ${(a as { action?: string }).action ?? ""}` },
-    execute: async (args): Promise<ToolResultLike> => {
+    execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { action: string; id?: string; cron?: string };
       if (a.action === "check") {
         const st = readNudgeState(deps.stateDir);
