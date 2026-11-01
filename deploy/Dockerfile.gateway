@@ -32,18 +32,7 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS build
 COPY packages ./packages
 RUN pnpm --filter @open-instinct/core build \
-  && pnpm --filter @open-instinct/server build \
-  && pnpm --filter @open-instinct/gateway build \
-  && pnpm --filter @open-instinct/cli build \
-  && pnpm --filter @open-instinct/computer build \
-  && pnpm --filter @open-instinct/context build \
-  && pnpm --filter @open-instinct/apps build \
-  && pnpm --filter @open-instinct/network build \
-  && pnpm --filter @open-instinct/payments build \
-  && pnpm --filter @open-instinct/ample build \
-  && pnpm --filter @open-instinct/atomicmail build \
-  && pnpm --filter @open-instinct/postiz-mcp build \
-  && pnpm --filter @open-instinct/inkbox build \
+  && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
 
 FROM base AS runtime
