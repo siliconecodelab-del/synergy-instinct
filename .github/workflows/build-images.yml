@@ -48,13 +48,18 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+      - name: Build image (no push)
+        run: |
+          docker buildx build \
+            --file ${{ matrix.image.dockerfile }} \
+            --platform linux/amd64 \
+            --load \
+            --progress=plain \
+            .
+
+      - name: Push image
+        run: |
+          TAGS=${{ steps.meta.outputs.tags }}
+          for tag in $TAGS; do
+            docker push $tag
+          done
