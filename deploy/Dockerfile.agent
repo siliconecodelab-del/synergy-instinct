@@ -42,17 +42,14 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY packages ./packages
-COPY skills ./skills
 RUN pnpm --filter @open-instinct/core build \
   && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
 
 FROM base AS runtime
 ENV NODE_ENV=production \
-    INSTINCT_DATA_DIR=/data \
-    INSTINCT_SKILLS_DIR=/app/skills
+    INSTINCT_DATA_DIR=/data
 COPY --from=build /app /app
-COPY skills ./skills
 COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
 RUN chmod 0755 /app/deploy/entrypoint.sh
 VOLUME ["/data"]
