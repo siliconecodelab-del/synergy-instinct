@@ -51,14 +51,12 @@ jobs:
       - name: Build and push image
         run: |
           TAGS=${{ steps.meta.outputs.tags }}
-          TAG_ARGS=""
           for tag in $TAGS; do
-            TAG_ARGS="$TAG_ARGS --tag $tag"
+            docker buildx build \
+              --file ${{ matrix.image.dockerfile }} \
+              --platform linux/amd64 \
+              --tag $tag \
+              --push \
+              --progress=plain \
+              .
           done
-          docker buildx build \
-            --file ${{ matrix.image.dockerfile }} \
-            --platform linux/amd64,linux/arm64 \
-            $TAG_ARGS \
-            --push \
-            --progress=plain \
-            .
