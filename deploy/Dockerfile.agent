@@ -1,25 +1,14 @@
-# Open Instinct agent image. One container = one person's agent.
-# Satisfies the Maritime BYO contract: 0.0.0.0:$PORT, GET /health, POST /chat, /data, python3 on PATH.
-#
-# Port: the image sets no PORT. Maritime injects PORT=18789 for framework "custom" (8080 is
-# reserved inside the VM); docker-compose sets PORT=8080 explicitly;
-# the server itself falls back to 8080 for a bare local run. EXPOSE and HEALTHCHECK follow $PORT.
-#
-# User: the process runs as the unprivileged `instinct` user. The entrypoint starts as root only
-# long enough to make /data writable by that user (Maritime mounts it root-owned) and then drops
-# privileges with setpriv. The owner's bash tool therefore runs as `instinct`, not root.
+# Open Instinct gateway image: the stateless relay from Inkbox webhooks to Maritime agents,
+# plus the signup and connect pages. One per deployment, many users.
 FROM node:22-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 ca-certificates curl git util-linux \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
-  && corepack enable \
-  && python3 --version \
-  && setpriv --version
+  && corepack enable
 WORKDIR /app
 
-# Manifests first so dependency layers cache across source changes.
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc tsconfig.base.json ./
 # pnpm applies patchedDependencies during install, so the patch files must be present first.
@@ -34,49 +23,22 @@ COPY packages/payments/package.json packages/payments/
 COPY packages/ample/package.json packages/ample/
 COPY packages/atomicmail/package.json packages/atomicmail/
 COPY packages/agentrun/package.json packages/agentrun/
-COPY packages/postiz-mcp/package.json packages/postiz-mcp/
 COPY packages/server/package.json packages/server/
 COPY packages/gateway/package.json packages/gateway/
 COPY packages/cli/package.json packages/cli/
+COPY packages/postiz-mcp/package.json packages/postiz-mcp/
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY packages ./packages
-COPY skills ./skills
 RUN pnpm --filter @open-instinct/core build \
   && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
 
 FROM base AS runtime
 ENV NODE_ENV=production \
-    INSTINCT_DATA_DIR=/data \
-    INSTINCT_SKILLS_DIR=/app/skills
-RUN groupadd --system instinct \
-  && useradd --system --gid instinct --uid 10001 --create-home --home-dir /home/instinct --shell /usr/sbin/nologin instinct \
-  && mkdir -p /data \
-  && chown instinct:instinct /data \
-  && chmod 0750 /data
-# The Ample CLI, for ample_deploy (packages/ample). A static binary, pinned and checksummed.
-# dpkg names the image's own architecture, so this is right for any builder and platform.
-ARG AMPLE_VERSION=0.1.29
-ARG AMPLE_SHA256_AMD64=12d2fd750cf19e135c898fe77dd19c6e6392556b22455fd6a492a9d9664928c6
-ARG AMPLE_SHA256_ARM64=978b4f6b8f1fb02823286012ec75a91179465c3f5e75213f0a70abf29a41ab3e
-RUN arch="$(dpkg --print-architecture)" \
-  && case "$arch" in \
-      amd64) sha="$AMPLE_SHA256_AMD64" ;; \
-      arm64) sha="$AMPLE_SHA256_ARM64" ;; \
-      *) echo "no Ample CLI for $arch" >&2; exit 1 ;; \
-    esac \
-  && curl -fsSL -o /usr/local/bin/ample "https://get.ample.computer/releases/${AMPLE_VERSION}/ample-linux-${arch}" \
-  && echo "$sha  /usr/local/bin/ample" | sha256sum -c - \
-  && chmod 0755 /usr/local/bin/ample \
-  && ample --version
-COPY --from=build --chown=instinct:instinct /app /app
-COPY --chown=instinct:instinct deploy/entrypoint.sh /app/deploy/entrypoint.sh
-RUN chmod 0755 /app/deploy/entrypoint.sh
-VOLUME ["/data"]
-# Documentation only: the real port is $PORT at runtime (see the note at the top).
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" || exit 1
-ENTRYPOINT ["/app/deploy/entrypoint.sh"]
-CMD ["node", "packages/server/dist/main.js"]
+    PORT=8787
+COPY --from=build /app /app
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+CMD ["node", "packages/gateway/dist/main.js"]
