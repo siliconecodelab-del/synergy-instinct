@@ -49,7 +49,6 @@ jobs:
           TAG=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:latest
           docker buildx build \
             --file ${{ matrix.image.dockerfile }} \
-            --platform linux/amd64,linux/arm64 \
             --tag $TAG \
             --push \
             --progress=plain \
