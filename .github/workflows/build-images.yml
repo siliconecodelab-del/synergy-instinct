@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - name: open-instinct-agent
+          - name: synergy-instinct-agent
             dockerfile: deploy/Dockerfile.agent
           - name: open-instinct-gateway
             dockerfile: deploy/Dockerfile.gateway
@@ -44,11 +44,13 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Build and push image
+        run: |
+          TAG=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:latest
+          docker buildx build \
+            --file ${{ matrix.image.dockerfile }} \
+            --platform linux/amd64,linux/arm64 \
+            --tag $TAG \
+            --push \
+            --progress=plain \
+            .
