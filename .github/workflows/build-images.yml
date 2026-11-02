@@ -33,13 +33,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.image.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push image
         run: |
           TAG=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:latest
-          docker buildx build \
+          docker build \
             --file ${{ matrix.image.dockerfile }} \
-            --platform linux/amd64 \
             --tag $TAG \
-            --push \
-            --progress=plain \
             .
+          docker push $TAG
