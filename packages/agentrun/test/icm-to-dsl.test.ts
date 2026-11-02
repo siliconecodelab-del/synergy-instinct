@@ -60,4 +60,29 @@ describe("icmToDsl", () => {
     expect(parsed.v).toBe(2);
     expect(parsed.name).toBe("save-test");
   });
+
+  it("inserts an escalate node after a Hybrid stage with a human checkpoint", () => {
+    const root = mkdtempSync(join(tmpdir(), "icm-hybrid-"));
+    const stagesDir = join(root, "stages");
+    mkdirSync(stagesDir, { recursive: true });
+    writeFileSync(join(root, "AGENTS.md"), `# Entry\nRoutes to stages/01_draft.md then stages/02_send.md.\n`);
+    writeFileSync(
+      join(stagesDir, "01_draft.md"),
+      `# Draft VIP Replies\nPrepare drafts.\n\n## Check\nA person reviews and approves the drafts before sending.\n`,
+    );
+    writeFileSync(
+      join(stagesDir, "02_send.md"),
+      `# Send Replies\nSend approved drafts.\n\n## Check\nScript verifies HTTP 200.\n`,
+    );
+
+    const result = icmToDsl(root, { name: "hybrid-triage", classification: "Hybrid" });
+    const rootNode = result.workflow.root as any;
+    expect(rootNode.node).toBe("chain");
+    // 01_draft (agent) -> human_check_stages-01-draft-md (escalate) -> 02_send (agent)
+    expect(rootNode.steps.length).toBe(3);
+    expect(rootNode.steps[0].node).toBe("agent");
+    expect(rootNode.steps[1].node).toBe("escalate");
+    expect(rootNode.steps[1].summary).toContain("Human checkpoint (Draft VIP Replies)");
+    expect(rootNode.steps[2].node).toBe("agent");
+  });
 });

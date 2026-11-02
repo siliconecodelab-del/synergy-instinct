@@ -69,6 +69,7 @@ export function listSOPs(stateDir: StateDir): string[] {
 export function writeSOP(
   stateDir: StateDir,
   doc: SOPDocument,
+  options?: { overwrite?: boolean },
 ): { path: string; created: boolean } {
   const targetPath = resolveSOPPath(
     stateDir,
@@ -76,7 +77,7 @@ export function writeSOP(
     doc.frontmatter.title,
   );
 
-  if (existsSync(targetPath)) {
+  if (existsSync(targetPath) && !options?.overwrite) {
     throw new Error(
       `SOP already exists at ${targetPath}. Delete or rename the existing file before writing again.`,
     );

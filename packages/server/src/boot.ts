@@ -48,7 +48,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -478,6 +478,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
     registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
     registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
+    registry.register(sopProactiveNudgeTool({ stateDir: state, composio: apps }));
     registry.register(workflowTraceTool({ stateDir: state }));
     registry.register(pipelineStatusTool({ stateDir: state }));
     registry.register(pipelinePrefsTool({ stateDir: state }));
@@ -514,12 +515,14 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "For fully automatic runs, use the `pipeline-runner` skill (auto mode): it persists pipeline " +
       "state under <state>/agentrun/pipelines/ and surfaces only 'Run now? (yes/no)' and " +
       "'Run on a schedule? (yes/no)'.\n\n" +
-      "# SOP Authoring\n" +
-      "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures " +
-      "and `sop_check_required_tools` to verify which required apps are connected via Composio. " +
-      "When an SOP lists `required_tools_or_skills`, check their connection status and offer " +
-      "`apps_connect` links for any that are not yet connected. SOPs are written to " +
-      "<data>/Company-brain/SOPs/<department>/<sop_title>.md.",
+      "# SOP Authoring & Role Map\n" +
+      "You have access to `generate_dynamic_sop` to create OKF-compliant Standard Operating Procedures, " +
+      "`sop_check_required_tools` to verify which required apps are connected via Composio, and " +
+      "`sop_proactive_nudge` for role-aware proactive nudges and Hybrid-to-Automated graduation. " +
+      "Every SOP defines an explicit Role Map ('Where You Fit vs. Where the Agent Fits') based on its " +
+      "`execution_classification` (`Manual` | `Hybrid` | `Fully_Automated`). Always surface this Role Map " +
+      "to the owner when creating or nudging about an SOP while keeping internal engine stages (ICM/tracer/DSL) " +
+      "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.",
     );
   }
 

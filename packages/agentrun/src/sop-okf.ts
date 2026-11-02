@@ -54,9 +54,24 @@ export interface SOPStep {
   checkpoint?: boolean;
 }
 
+export interface SOPRoleMap {
+  /** High-level label of the human vs. agent split. */
+  classification: ExecutionClassification;
+  /** Steps executed autonomously by the agent. */
+  agentScope: string;
+  /** Steps or checkpoints requiring the human's action, taste, or judgment. */
+  humanScope: string;
+  /** When and why the agent will message the human during this SOP. */
+  cadenceAndNudges: string;
+  /** Compact 1-2 line iMessage summary of where the human fits in this SOP. */
+  userSummary: string;
+}
+
 export interface SOPBody {
   /** Trigger or entry condition: when this SOP should be invoked. */
   trigger?: string;
+  /** Explicit contract of where the human fits vs. where the agent fits within this SOP. */
+  role_map?: SOPRoleMap;
   /** Ordered list of procedural steps. */
   steps: SOPStep[];
   /** Exit criteria: what "done" looks like. */
@@ -249,6 +264,15 @@ export function serializeSOP(doc: SOPDocument): string {
   }
   lines.push("");
 
+  const roleMap = body.role_map ?? buildSOPRoleMap(frontmatter.execution_classification, body.steps, frontmatter.title);
+  lines.push("## Role Map: Where You Fit vs. Where the Agent Fits");
+  lines.push("");
+  lines.push(`- **Classification:** ${roleMap.classification}`);
+  lines.push(`- **Agent Scope:** ${roleMap.agentScope}`);
+  lines.push(`- **Your Scope (Human):** ${roleMap.humanScope}`);
+  lines.push(`- **When You Hear From Me:** ${roleMap.cadenceAndNudges}`);
+  lines.push("");
+
   lines.push("## Procedural Steps");
   lines.push("");
   if (body.steps.length > 0) {
@@ -319,7 +343,12 @@ export function parseSOP(markdown: string): SOPDocument | undefined {
     const key = line.slice(0, colon).trim();
     const rawValue = line.slice(colon + 1).trim();
     let value: unknown = rawValue;
-    if (typeof rawValue === "string" && rawValue.startsWith("[") && rawValue.endsWith("]")) {
+    if (
+      typeof rawValue === "string" &&
+      ((rawValue.startsWith("[") && rawValue.endsWith("]")) ||
+        (rawValue.startsWith("\"") && rawValue.endsWith("\"")) ||
+        (rawValue.startsWith("{") && rawValue.endsWith("}")))
+    ) {
       try {
         value = JSON.parse(rawValue);
       } catch {
@@ -357,11 +386,13 @@ export function parseSOP(markdown: string): SOPDocument | undefined {
   steps.sort((a, b) => a.step - b.step);
 
   const fm = frontmatter as Record<string, string | string[] | undefined>;
+  const classification = String(fm.execution_classification ?? "Manual") as ExecutionClassification;
+  const resolvedTitle = String(fm.title ?? title);
   return {
     frontmatter: {
-      title: String(fm.title ?? title),
+      title: resolvedTitle,
       department: String(fm.department ?? ""),
-      execution_classification: String(fm.execution_classification ?? "Manual") as ExecutionClassification,
+      execution_classification: classification,
       core_objective: String(fm.core_objective ?? ""),
       required_tools_or_skills: Array.isArray(fm.required_tools_or_skills)
         ? (fm.required_tools_or_skills as string[])
@@ -371,6 +402,7 @@ export function parseSOP(markdown: string): SOPDocument | undefined {
       status: String(fm.status ?? "draft") as SOPStatus,
     },
     body: {
+      role_map: buildSOPRoleMap(classification, steps, resolvedTitle),
       steps,
       exit_criteria: undefined,
       notes: undefined,
@@ -378,11 +410,80 @@ export function parseSOP(markdown: string): SOPDocument | undefined {
   };
 }
 
+/** Detect whether a step description explicitly implies a human checkpoint/approval in Hybrid mode. */
+function isHumanCheckpointDescription(desc: string): boolean {
+  return /\b(review|approve|approval|confirm|sign-off|sign off|human|decide|check|verify with owner|edit|judgment|taste)\b/i.test(
+    desc,
+  );
+}
+
+/**
+ * Build the explicit Role Map ("Where You Fit vs. Where the Agent Fits") within the SOP.
+ * Keeps underlying engine mechanics (ICM / Tracer / DSL) abstracted away from the user.
+ */
+export function buildSOPRoleMap(
+  classification: ExecutionClassification,
+  steps: SOPStep[],
+  sopTitle = "this SOP",
+): SOPRoleMap {
+  const total = steps.length;
+  const stepNums = steps.map((s) => `Step ${s.step}`);
+  const checkpointSteps = steps.filter((s) => s.checkpoint || s.owner?.toLowerCase().includes("human"));
+
+  if (classification === "Manual") {
+    const gateLabels =
+      checkpointSteps.length > 0
+        ? checkpointSteps.map((s) => `Step ${s.step}`).join(", ")
+        : stepNums.join(", ") || "each step";
+    return {
+      classification: "Manual",
+      agentScope:
+        "Pacer & Scribe only — I cue up context before you begin, walk you through each step on request or schedule, and log completion.",
+      humanScope: `You execute all ${total || 1} step(s) (${stepNums.join(", ") || "Step 1"}) and confirm sign-off at checkpoints (${gateLabels}).`,
+      cadenceAndNudges:
+        "I will never run steps behind your back. When triggered or scheduled, I'll text you Step 1 and wait for your 'done' before advancing.",
+      userSummary: `Where you fit (${sopTitle} — Manual): You execute Steps 1–${total || 1}; I act as your pacer and scribe, cueing up each step and logging your sign-off at ${gateLabels}.`,
+    };
+  }
+
+  if (classification === "Hybrid") {
+    const humanSteps = steps.filter((s) => s.checkpoint || s.owner?.toLowerCase().includes("human"));
+    const agentSteps = steps.filter((s) => !s.checkpoint && !s.owner?.toLowerCase().includes("human"));
+    const humanLabel =
+      humanSteps.length > 0
+        ? humanSteps.map((s) => `Step ${s.step} (${s.description.slice(0, 48).replace(/\s+$/, "")}${s.description.length > 48 ? "…" : ""})`).join("; ")
+        : `Step ${total || 1} (final review & approval)`;
+    const humanShort =
+      humanSteps.length > 0 ? humanSteps.map((s) => `Step ${s.step}`).join(", ") : `Step ${total || 1}`;
+    const agentShort =
+      agentSteps.length > 0 ? agentSteps.map((s) => `Step ${s.step}`).join(", ") : "prep & execution steps";
+
+    return {
+      classification: "Hybrid",
+      agentScope: `Autonomous execution of ${agentShort} (gathering context, running tools, and preparing drafts/outputs).`,
+      humanScope: `Taste & approval gate at ${humanLabel} — you review what I prepared and reply 'yes' or tell me what to adjust.`,
+      cadenceAndNudges: `I run ${agentShort} in the background and pause to text you at ${humanShort} with the ready draft/summary before continuing.`,
+      userSummary: `Where you fit (${sopTitle} — Hybrid): I handle ${agentShort} autonomously and pause at ${humanShort} for your review/approval before finishing.`,
+    };
+  }
+
+  // Fully_Automated
+  return {
+    classification: "Fully_Automated",
+    agentScope: `100% of Steps 1–${total || 1} (${stepNums.join(", ") || "all steps"}) executed end-to-end with automated verification.`,
+    humanScope:
+      "Zero involvement during normal runs — you set the intent upfront and only step in if an exception or verification failure escalates.",
+    cadenceAndNudges:
+      "Runs on autopilot when triggered or scheduled. I only send a compact completion receipt (or alert you if an exception blocks a step).",
+    userSummary: `Where you fit (${sopTitle} — Fully Automated): Zero manual steps — I run Steps 1–${total || 1} end-to-end and only text you a completion summary or if an exception needs your call.`,
+  };
+}
+
 /**
  * Build an SOPDocument from the generate_dynamic_sop tool parameters.
  * `execution_classification` shapes the step structure: Manual adds owners
- * and checkpoints; Hybrid annotates tool owners; Fully_Automated emphasizes
- * tool execution and automated checks.
+ * and checkpoints; Hybrid annotates tool owners and human taste checkpoints;
+ * Fully_Automated emphasizes tool execution and automated checks.
  */
 export function buildSOPDocument(params: {
   sop_title: string;
@@ -403,12 +504,10 @@ export function buildSOPDocument(params: {
     created_at = new Date().toISOString(),
   } = params;
 
-  const steps: SOPStep[] = [];
+  const rawSteps: string[] = [];
 
-  // Parse raw_procedural_steps (markdown) into steps.
-  // Each numbered list item or heading becomes a step.
+  // Parse raw_procedural_steps (markdown) into step descriptions.
   const stepLines = raw_procedural_steps.split(/\n+/);
-  let stepIndex = 0;
   let currentDescription: string[] = [];
 
   for (const line of stepLines) {
@@ -416,17 +515,7 @@ export function buildSOPDocument(params: {
     const numberedMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
     if (numberedMatch) {
       if (currentDescription.length > 0) {
-        steps.push({
-          step: ++stepIndex,
-          description: currentDescription.join(" ").trim(),
-          owner: execution_classification === "Manual" ? "Human operator" : undefined,
-          tools:
-            execution_classification !== "Manual"
-              ? required_tools_or_skills.slice(0, 2)
-              : undefined,
-          checkpoint:
-            execution_classification === "Manual" && stepIndex % 3 === 0,
-        });
+        rawSteps.push(currentDescription.join(" ").trim());
         currentDescription = [];
       }
       currentDescription.push(numberedMatch[2]!);
@@ -437,31 +526,52 @@ export function buildSOPDocument(params: {
     }
   }
   if (currentDescription.length > 0) {
-    steps.push({
-      step: ++stepIndex,
-      description: currentDescription.join(" ").trim(),
-      owner: execution_classification === "Manual" ? "Human operator" : undefined,
-      tools:
-        execution_classification !== "Manual"
-          ? required_tools_or_skills.slice(0, 2)
-          : undefined,
-      checkpoint:
-        execution_classification === "Manual" && stepIndex % 3 === 0,
-    });
+    rawSteps.push(currentDescription.join(" ").trim());
+  }
+  if (rawSteps.length === 0) {
+    rawSteps.push(raw_procedural_steps.trim());
   }
 
-  if (steps.length === 0) {
-    steps.push({
-      step: 1,
-      description: raw_procedural_steps.trim(),
-      owner: execution_classification === "Manual" ? "Human operator" : undefined,
-      tools:
-        execution_classification !== "Manual"
-          ? required_tools_or_skills.slice(0, 2)
-          : undefined,
-      checkpoint: execution_classification === "Manual",
-    });
-  }
+  // Determine Hybrid checkpoints: explicit human-review steps, or fallback to the penultimate/final step
+  const explicitHybridCheckpoints = rawSteps.map((d) => isHumanCheckpointDescription(d));
+  const hasExplicitHybrid = explicitHybridCheckpoints.some(Boolean);
+
+  const steps: SOPStep[] = rawSteps.map((desc, idx) => {
+    const stepNum = idx + 1;
+    if (execution_classification === "Manual") {
+      return {
+        step: stepNum,
+        description: desc,
+        owner: "Human operator",
+        tools: undefined,
+        checkpoint: rawSteps.length === 1 || stepNum % 3 === 0 || stepNum === rawSteps.length,
+      };
+    }
+    if (execution_classification === "Hybrid") {
+      const isHumanGate = hasExplicitHybrid
+        ? explicitHybridCheckpoints[idx]!
+        : rawSteps.length > 1
+          ? stepNum === rawSteps.length - 1
+          : true;
+      return {
+        step: stepNum,
+        description: desc,
+        owner: isHumanGate ? "Human (Taste / Approval Gate)" : "Agent",
+        tools: isHumanGate ? undefined : required_tools_or_skills.slice(0, 2),
+        checkpoint: isHumanGate,
+      };
+    }
+    // Fully_Automated
+    return {
+      step: stepNum,
+      description: desc,
+      owner: undefined,
+      tools: required_tools_or_skills.slice(0, 2),
+      checkpoint: false,
+    };
+  });
+
+  const roleMap = buildSOPRoleMap(execution_classification, steps, sop_title);
 
   return {
     frontmatter: {
@@ -475,6 +585,7 @@ export function buildSOPDocument(params: {
       status: "draft",
     },
     body: {
+      role_map: roleMap,
       steps,
       exit_criteria:
         execution_classification === "Fully_Automated"

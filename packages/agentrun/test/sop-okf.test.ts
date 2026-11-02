@@ -105,22 +105,31 @@ describe("buildSOPDocument", () => {
     expect(hasTools).toBe(true);
   });
 
-  it("builds a Hybrid classification SOP", () => {
+  it("builds a Hybrid classification SOP with Role Map and human taste checkpoints", () => {
     const doc = buildSOPDocument({
       sop_title: "Release Process",
       target_department: "Engineering",
       execution_classification: "Hybrid",
       core_objective: "Release software",
       required_tools_or_skills: ["GitHub", "CI/CD"],
-      raw_procedural_steps: "1. Create branch\n2. Run tests\n3. Deploy",
+      raw_procedural_steps: "1. Create branch\n2. Run tests and review release notes\n3. Deploy",
     });
 
     expect(doc.frontmatter.execution_classification).toBe("Hybrid");
+    expect(doc.body.role_map).toBeDefined();
+    expect(doc.body.role_map?.classification).toBe("Hybrid");
+    expect(doc.body.role_map?.userSummary).toContain("Where you fit (Release Process — Hybrid)");
+    // Step 2 mentions "review", so it is marked as a human checkpoint
+    expect(doc.body.steps[1]?.checkpoint).toBe(true);
+    expect(doc.body.steps[1]?.owner).toContain("Human");
+    // Step 1 and Step 3 are Agent steps
+    expect(doc.body.steps[0]?.owner).toBe("Agent");
+    expect(doc.body.steps[2]?.owner).toBe("Agent");
   });
 });
 
 describe("serializeSOP", () => {
-  it("produces valid OKF markdown with frontmatter", () => {
+  it("produces valid OKF markdown with frontmatter and Role Map", () => {
     const doc = buildSOPDocument({
       sop_title: "Test SOP",
       target_department: "GTM-playbook",
@@ -136,6 +145,10 @@ describe("serializeSOP", () => {
     expect(md).toContain("department: \"GTM-playbook\"");
     expect(md).toContain("execution_classification: Manual");
     expect(md).toContain("status: draft");
+    expect(md).toContain("## Role Map: Where You Fit vs. Where the Agent Fits");
+    expect(md).toContain("- **Classification:** Manual");
+    expect(md).toContain("- **Agent Scope:**");
+    expect(md).toContain("- **Your Scope (Human):**");
     expect(md).toContain("## Procedural Steps");
     expect(md).toContain("### Step 1");
     expect(md).toContain("### Step 2");

@@ -51,12 +51,17 @@ Run stages back-to-back. After each stage, update the record and print one progr
 
 Do NOT ask per-stage confirmations in auto mode. Only stop early if a stage fails.
 
-### ICM → DSL conversion (automatic)
+### ICM → DSL conversion (automatic & classification-aware)
 
 After the tracer passes, automatically convert the ICM workspace to an AgentRun DSL workflow
-using `icm_to_dsl`. The generated workflow declares `preflight.icmRoot` so
-`runWorkflowWithRecovery` runs the tracer as a mandatory pre-flight check before any step
-executes. The DSL is saved under `<state>/agentrun/dsls/<name>.json`.
+using `icm_to_dsl`, passing the SOP's `classification` (`Manual` | `Hybrid` | `Fully_Automated`).
+- For `Hybrid` and `Manual` SOPs, stages with human checkpoints (`Checkpoint: Yes` or `Check: a person`)
+  automatically include an AgentRun `escalate` node so execution pauses for the owner's review.
+- The generated workflow declares `preflight.icmRoot` so `runWorkflowWithRecovery` runs the tracer
+  as a mandatory pre-flight check before any step executes.
+- The DSL is saved under `<state>/agentrun/dsls/<name>.json`.
+- Always frame user-facing messages around the SOP's **Role Map** ("Where You Fit vs. Where the Agent Fits")
+  and keep internal ICM/tracer/DSL mechanics abstracted away.
 
 ### Failure handling
 

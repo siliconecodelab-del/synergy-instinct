@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateDir } from "@open-instinct/core";
-import { sopArchitectTool } from "../src/tool.js";
+import { sopArchitectTool, sopProactiveNudgeTool } from "../src/tool.js";
+import { PipelineStore } from "../src/pipeline-store.js";
 
 function tempStateDir(): StateDir {
   const root = mkdtempSync(join(tmpdir(), "sop-tool-test-"));
@@ -47,7 +48,16 @@ describe("sopArchitectTool", () => {
       const content = readFileSync(join(state.root, sopFile), "utf8");
       expect(content).toContain("---");
       expect(content).toContain("execution_classification: Manual");
+      expect(content).toContain("## Role Map: Where You Fit vs. Where the Agent Fits");
       expect(content).toContain("## Procedural Steps");
+      expect(text).toContain("Role Map (Where You Fit vs. Where the Agent Fits):");
+
+      // Verify PipelineStore was seeded with classification
+      const ps = new PipelineStore(state);
+      const rec = ps.bySop("hr/new-hire-onboarding");
+      expect(rec).toBeDefined();
+      expect(rec?.classification).toBe("Manual");
+      expect(rec?.stages.sop?.status).toBe("done");
     } finally {
       cleanup(state);
     }
@@ -122,6 +132,70 @@ describe("sopArchitectTool", () => {
       );
 
       expect(result.isError).toBe(true);
+    } finally {
+      cleanup(state);
+    }
+  });
+
+  it("sopProactiveNudgeTool scans, tracks checkpoint approvals, and graduates Hybrid -> Fully_Automated", async () => {
+    const state = tempStateDir();
+    try {
+      const archTool = sopArchitectTool({ stateDir: state });
+      const nudgeTool = sopProactiveNudgeTool({ stateDir: state });
+
+      // 1. Create a Hybrid SOP
+      await archTool.spec.execute(
+        {
+          sop_title: "Gmail Triage",
+          target_department: "GTM-playbook",
+          execution_classification: "Hybrid",
+          core_objective: "Triage inbox and reply to VIPs",
+          required_tools_or_skills: ["gmail"],
+          raw_procedural_steps: "1. Fetch unread\n2. Draft VIP replies\n3. Review and approve VIP drafts\n4. Send replies",
+        },
+        {} as any,
+      );
+
+      // 2. Record 5 consecutive unedited approvals
+      for (let i = 1; i <= 4; i++) {
+        const r = await nudgeTool.spec.execute(
+          {
+            action: "record_checkpoint_approval",
+            sop_title: "Gmail Triage",
+            target_department: "GTM-playbook",
+            edited: false,
+          },
+          {} as any,
+        );
+        expect(r.content[0].text).toContain(`consecutive unedited approvals: ${i}`);
+      }
+
+      const fifth = await nudgeTool.spec.execute(
+        {
+          action: "record_checkpoint_approval",
+          sop_title: "Gmail Triage",
+          target_department: "GTM-playbook",
+          edited: false,
+        },
+        {} as any,
+      );
+      expect(fifth.content[0].text).toContain("Graduation Nudge Ready:");
+      expect(fifth.content[0].text).toContain("graduate this SOP from Hybrid to Fully Automated");
+
+      // 3. Graduate the SOP
+      const gradRes = await nudgeTool.spec.execute(
+        {
+          action: "graduate",
+          sop_title: "Gmail Triage",
+          target_department: "GTM-playbook",
+        },
+        {} as any,
+      );
+      expect(gradRes.content[0].text).toContain("Graduated SOP \"Gmail Triage\" to Fully_Automated");
+      expect(gradRes.content[0].text).toContain("Fully Automated");
+
+      const ps = new PipelineStore(state);
+      expect(ps.bySop("gtm-playbook/gmail-triage")?.classification).toBe("Fully_Automated");
     } finally {
       cleanup(state);
     }

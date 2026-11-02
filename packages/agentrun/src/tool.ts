@@ -18,7 +18,9 @@ import { WorkflowStore } from "./store.js";
 import type { StateDir } from "@open-instinct/core";
 import {
   buildSOPDocument,
+  buildSOPRoleMap,
   validateSOPFrontmatter,
+  serializeSOP,
   type ExecutionClassification,
   type ComposioLike,
   parseSOP,
@@ -275,6 +277,39 @@ export function sopArchitectTool(deps: {
       // Write to disk (refuses to overwrite existing)
       try {
         const { path } = writeSOP(stateDir, doc);
+        const roleMap = doc.body.role_map ?? buildSOPRoleMap(doc.frontmatter.execution_classification, doc.body.steps, args.sop_title);
+
+        // Seed or update PipelineStore record so proactive nudges know this SOP's state & classification
+        const sopRel = `${kebabCase(args.target_department)}/${kebabCase(args.sop_title)}`;
+        const pipeStore = new PipelineStore(stateDir);
+        const existingPipe = pipeStore.bySop(sopRel);
+        const prefs = readPipelinePrefs(stateDir);
+        const nowIso = new Date().toISOString();
+        pipeStore.save({
+          id: existingPipe?.id ?? `pipe_${kebabCase(args.sop_title).slice(0, 24)}`,
+          sop: sopRel,
+          classification: doc.frontmatter.execution_classification,
+          mode: existingPipe?.mode ?? prefs.mode,
+          stages: {
+            ...existingPipe?.stages,
+            sop: { status: "done", path: `${sopRel}.md`, updatedAt: nowIso },
+          },
+          consecutiveCheckpointApprovals: existingPipe?.consecutiveCheckpointApprovals ?? 0,
+          lastPrompt: existingPipe?.lastPrompt,
+          lastRun: existingPipe?.lastRun ?? null,
+          schedule: existingPipe?.schedule ?? null,
+          createdAt: existingPipe?.createdAt ?? nowIso,
+          updatedAt: nowIso,
+        });
+
+        const roleMapLines = [
+          `Role Map (Where You Fit vs. Where the Agent Fits):`,
+          `  - Classification: ${roleMap.classification}`,
+          `  - Agent Scope: ${roleMap.agentScope}`,
+          `  - Your Scope (Human): ${roleMap.humanScope}`,
+          `  - When You Hear From Me: ${roleMap.cadenceAndNudges}`,
+          `  - Summary for Owner: ${roleMap.userSummary}`,
+        ];
 
         // Check tool availability via Composio and update the SOP with status
         if (composio && doc.frontmatter.required_tools_or_skills.length > 0) {
@@ -282,7 +317,7 @@ export function sopArchitectTool(deps: {
             const toolStatus = await checkToolAvailability(doc, composio);
             const updatedDoc = updateSOPToolStatus(doc, toolStatus);
             // Rewrite the file with tool status included
-            writeSOP(stateDir, updatedDoc);
+            writeSOP(stateDir, updatedDoc, { overwrite: true });
             const connected = Object.entries(toolStatus)
               .filter(([, s]) => s === "connected")
                 .map(([t]) => t);
@@ -292,7 +327,10 @@ export function sopArchitectTool(deps: {
             const notConfigured = Object.entries(toolStatus)
               .filter(([, s]) => s === "not_configured")
                 .map(([t]) => t);
-            let statusLines = [`SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}).`];
+            let statusLines = [
+              `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}).`,
+              ...roleMapLines,
+            ];
             if (connected.length > 0) statusLines.push(`Tools connected: ${connected.join(", ")}.`);
             if (notConnected.length > 0) statusLines.push(`Tools not connected: ${notConnected.join(", ")}. Use generate_dynamic_sop again or apps_connect to connect them.`);
             if (notConfigured.length > 0) statusLines.push(`Tools not configured: ${notConfigured.join(", ")}. Add them to COMPOSIO_TOOLKITS or use COMPOSIO_TOOLKITS=all.`);
@@ -300,13 +338,19 @@ export function sopArchitectTool(deps: {
           } catch (checkErr) {
             // Tool check failure shouldn't fail SOP creation
             return okResult(
-              `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}). Tool availability check skipped: ${checkErr instanceof Error ? checkErr.message : String(checkErr)}`,
+              [
+                `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}). Tool availability check skipped: ${checkErr instanceof Error ? checkErr.message : String(checkErr)}`,
+                ...roleMapLines,
+              ].join("\n"),
             );
           }
         }
 
         return okResult(
-          `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}).`,
+          [
+            `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}).`,
+            ...roleMapLines,
+          ].join("\n"),
         );
       } catch (err) {
         return errResult(
@@ -739,19 +783,31 @@ export function icmToDslTool(deps: { stateDir: StateDir }): RegisteredTool {
     description:
       "Convert an ICM (folder-as-architecture) workspace into a typed AgentRun DSL " +
       "workflow. Parameters: icmRoot (path to ICM workspace), name (optional), " +
-      "task (optional trace task). The generated workflow declares preflight.icmRoot " +
-      "so the tracer runs as a mandatory pre-flight check before any step executes.",
+      "task (optional trace task), classification (optional: Manual | Hybrid | Fully_Automated). " +
+      "The generated workflow declares preflight.icmRoot so the tracer runs as a mandatory " +
+      "pre-flight check before any step executes.",
     parameters: Type.Object({
       icmRoot: Type.String({ description: "Path to the ICM workspace root (contains entry file + stages/)." }),
       name: Type.Optional(Type.String({ description: "Workflow name (default derived from icmRoot)." })),
       task: Type.Optional(Type.String({ description: "Trace task for preflight (default: icmRoot path)." })),
+      classification: Type.Optional(
+        Type.Union([
+          Type.Literal("Manual"),
+          Type.Literal("Hybrid"),
+          Type.Literal("Fully_Automated"),
+        ], { description: "Originating SOP classification; inserts human checkpoint escalations for Hybrid/Manual." }),
+      ),
     }),
     meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `icm_to_dsl ${(a as { icmRoot?: string }).icmRoot ?? ""}` },
     execute: async (args: any): Promise<ToolResultLike> => {
-      const a = args as { icmRoot: string; name?: string; task?: string };
+      const a = args as { icmRoot: string; name?: string; task?: string; classification?: ExecutionClassification };
       if (!a.icmRoot) return errResult("icmRoot is required.");
       try {
-        const result = icmToDsl(a.icmRoot, { name: a.name, task: a.task });
+        const result = icmToDsl(a.icmRoot, {
+          name: a.name,
+          task: a.task,
+          classification: a.classification,
+        });
         const saved = saveDslWorkflow(deps.stateDir, result);
         const summary = [
           `ICM "${a.icmRoot}" converted to AgentRun DSL workflow "${saved.workflow.name}".`,
@@ -770,9 +826,12 @@ export function icmToDslTool(deps: { stateDir: StateDir }): RegisteredTool {
 
 /**
  * Schedule a pipeline run, gated by the nudge gate (quiet hours + daily dedup).
+ * Registers a real Scheduler job tailored to the SOP's execution_classification
+ * so the user's role map ("Where You Fit") drives the scheduled interaction.
  */
 export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTool {
   const store = new PipelineStore(deps.stateDir);
+  const scheduler = new Scheduler(deps.stateDir);
   return defineTool({
     name: "pipeline_schedule",
     label: "Pipeline Schedule",
@@ -801,18 +860,44 @@ export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTo
           return errResult(`Cannot schedule now: ${gate.reason}. Try again outside quiet hours or tomorrow.`);
         }
         const cron = a.cron || "0 9 * * *";
-        const jobId = `pipe-${a.id}-${crypto.randomUUID().slice(0, 8)}`;
+        const classification = existing.classification ?? "Hybrid";
+        const dslName = existing.stages.dsl?.name ?? existing.sop;
+
+        const schedulePrompt =
+          classification === "Manual"
+            ? `Run the Manual SOP routine for "${existing.sop}": cue up context and text the owner Step 1 as their pacer/scribe. Wait for their "done" before advancing.`
+            : classification === "Fully_Automated"
+              ? `Run the Fully Automated SOP "${existing.sop}" (workflow "${dslName}") end-to-end. Only text the owner a compact completion summary or if an exception/escalation occurs.`
+              : `Run the Hybrid SOP routine for "${existing.sop}" (workflow "${dslName}"): execute the autonomous agent prep steps up to the human checkpoint, then text the owner the ready draft/summary for their review and approval.`;
+
+        let jobId = `pipe-${a.id}-${crypto.randomUUID().slice(0, 8)}`;
+        try {
+          const createdJob = scheduler.create({
+            name: `sop-routine-${a.id}`,
+            prompt: schedulePrompt,
+            enabled: true,
+            cron,
+            tz: "UTC",
+          });
+          jobId = createdJob.id;
+        } catch {
+          // Fallback to generated jobId if scheduler creation fails
+        }
+
         const next: PipelineRecord = { ...existing, id: existing.id };
         next.schedule = { cron, jobId };
         next.updatedAt = new Date().toISOString();
         store.save(next);
         writeNudgeState(deps.stateDir, { lastNudgeAt: new Date().toISOString() });
-        return okResult(`Pipeline "${a.id}" scheduled: ${cron} (job ${jobId}). Nudge recorded.`);
+        return okResult(`Pipeline "${a.id}" (${classification}) scheduled: ${cron} (job ${jobId}). Nudge recorded.`);
       }
       if (a.action === "unschedule") {
         if (!a.id) return errResult("id is required.");
         const existing = store.get(a.id);
         if (!existing) return errResult(`pipeline not found: ${a.id}`);
+        if (existing.schedule?.jobId) {
+          scheduler.delete(existing.schedule.jobId);
+        }
         const next: PipelineRecord = { ...existing, id: existing.id };
         next.schedule = null;
         next.updatedAt = new Date().toISOString();
@@ -820,6 +905,253 @@ export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTo
         return okResult(`Pipeline "${a.id}" unscheduled.`);
       }
       return errResult("unknown action");
+    },
+  });
+}
+
+/**
+ * Proactive SOP & Pipeline Nudge Routine tool (`sop_proactive_nudge`).
+ *
+ * Scans the company brain SOPs and PipelineStore to surface role-aware nudges:
+ * - "scan": inspects all SOPs for uncompiled pipelines, disconnected Composio tools,
+ *   or Hybrid SOPs ready for graduation to Fully_Automated (5+ consecutive approvals).
+ * - "record_checkpoint_approval": records a human checkpoint approval (with or without edits)
+ *   on a Hybrid SOP, triggering a graduation nudge at 5 consecutive unedited approvals.
+ * - "graduate": upgrades a Hybrid SOP to Fully_Automated when the owner confirms.
+ */
+export function sopProactiveNudgeTool(deps: {
+  stateDir: StateDir;
+  composio?: ComposioLike;
+}): RegisteredTool {
+  const { stateDir, composio } = deps;
+  const store = new PipelineStore(stateDir);
+  const scheduler = new Scheduler(stateDir);
+
+  return defineTool({
+    name: "sop_proactive_nudge",
+    label: "SOP Proactive Nudge & Routine",
+    description:
+      "Run or schedule proactive, role-aware nudges for SOPs. Actions: " +
+      "scan (detect uncompiled SOPs, disconnected tools, or Hybrid->Automated graduation candidates and return a role-aware nudge), " +
+      "enable_schedule (set up daily 09:00 proactive SOP nudge cron), " +
+      "record_checkpoint_approval (track consecutive unedited approvals on a Hybrid SOP checkpoint), " +
+      "graduate (upgrade a Hybrid SOP to Fully_Automated after repeated approvals).",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("scan"),
+        Type.Literal("enable_schedule"),
+        Type.Literal("record_checkpoint_approval"),
+        Type.Literal("graduate"),
+      ]),
+      sop_title: Type.Optional(Type.String({ description: "SOP title (for record_checkpoint_approval / graduate)." })),
+      target_department: Type.Optional(Type.String({ description: "Department (for record_checkpoint_approval / graduate)." })),
+      edited: Type.Optional(Type.Boolean({ description: "Whether the human edited the draft at the checkpoint (default: false)." })),
+      cron: Type.Optional(Type.String({ description: "Cron for enable_schedule (default: 0 9 * * *)." })),
+    }),
+    meta: {
+      capabilities: ["converse"],
+      group: "system",
+      describe: (a) => `sop_proactive_nudge ${(a as { action?: string }).action ?? ""}`,
+    },
+    execute: async (args: any): Promise<ToolResultLike> => {
+      const a = args as {
+        action: "scan" | "enable_schedule" | "record_checkpoint_approval" | "graduate";
+        sop_title?: string;
+        target_department?: string;
+        edited?: boolean;
+        cron?: string;
+      };
+      const fs = require("node:fs");
+
+      if (a.action === "enable_schedule") {
+        const cron = a.cron || "0 9 * * *";
+        const entry = scheduler.create({
+          name: "sop-proactive-nudge-daily",
+          prompt:
+            "Run sop_proactive_nudge with action='scan'. If a nudge is allowed and returned, send the compact role-aware nudge message to the owner.",
+          enabled: true,
+          cron,
+          tz: "UTC",
+        });
+        return okResult(
+          `Daily proactive SOP nudge scheduled (${cron}, job ${entry.id}). Quiet hours (22:00-07:00) and 1/day dedup enforced.`,
+        );
+      }
+
+      if (a.action === "record_checkpoint_approval") {
+        if (!a.sop_title || !a.target_department) {
+          return errResult("sop_title and target_department are required.");
+        }
+        const sopRel = `${kebabCase(a.target_department)}/${kebabCase(a.sop_title)}`;
+        const existing = store.bySop(sopRel);
+        const nowIso = new Date().toISOString();
+        const prevCount = existing?.consecutiveCheckpointApprovals ?? 0;
+        const nextCount = a.edited ? 0 : prevCount + 1;
+
+        const record: PipelineRecord = existing ?? {
+          id: `pipe_${kebabCase(a.sop_title).slice(0, 24)}`,
+          sop: sopRel,
+          classification: "Hybrid",
+          mode: readPipelinePrefs(stateDir).mode,
+          stages: { sop: { status: "done", path: `${sopRel}.md`, updatedAt: nowIso } },
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        record.consecutiveCheckpointApprovals = nextCount;
+        record.updatedAt = nowIso;
+        store.save(record);
+
+        if (nextCount >= 5 && (record.classification ?? "Hybrid") === "Hybrid") {
+          return okResult(
+            `Checkpoint approval recorded (${nextCount} consecutive without edits).\n` +
+              `Graduation Nudge Ready: "You've approved the checkpoint in '${a.sop_title}' ${nextCount} times in a row without edits. Want to take yourself out of the loop and graduate this SOP from Hybrid to Fully Automated? (yes/no)"`,
+          );
+        }
+        return okResult(
+          `Checkpoint approval recorded for "${a.sop_title}" (consecutive unedited approvals: ${nextCount}).`,
+        );
+      }
+
+      if (a.action === "graduate") {
+        if (!a.sop_title || !a.target_department) {
+          return errResult("sop_title and target_department are required.");
+        }
+        const sopPath = resolveSOPPath(stateDir, a.target_department, a.sop_title);
+        if (!fs.existsSync(sopPath)) {
+          return errResult(`SOP not found at ${sopPath}.`);
+        }
+        const markdown = fs.readFileSync(sopPath, "utf8");
+        const doc = parseSOP(markdown);
+        if (!doc) {
+          return errResult(`Failed to parse SOP at ${sopPath}.`);
+        }
+        doc.frontmatter.execution_classification = "Fully_Automated";
+        doc.body.steps = doc.body.steps.map((s) => ({
+          ...s,
+          owner: undefined,
+          checkpoint: false,
+          tools: doc.frontmatter.required_tools_or_skills.slice(0, 2),
+        }));
+        doc.body.role_map = buildSOPRoleMap("Fully_Automated", doc.body.steps, doc.frontmatter.title);
+        doc.body.exit_criteria = "All automated steps complete without error; output artifact verified.";
+        doc.body.notes = "Graduated from Hybrid to Fully_Automated after repeated human checkpoint approvals.";
+        writeSOP(stateDir, doc, { overwrite: true });
+
+        const sopRel = `${kebabCase(a.target_department)}/${kebabCase(a.sop_title)}`;
+        const existing = store.bySop(sopRel);
+        if (existing) {
+          existing.classification = "Fully_Automated";
+          existing.consecutiveCheckpointApprovals = 0;
+          existing.updatedAt = new Date().toISOString();
+          store.save(existing);
+        }
+
+        return okResult(
+          `Graduated SOP "${doc.frontmatter.title}" to Fully_Automated.\n` +
+            `${doc.body.role_map.userSummary}`,
+        );
+      }
+
+      if (a.action === "scan") {
+        const nudgeState = readNudgeState(stateDir);
+        const gate = canNudge(new Date(), nudgeState.lastNudgeAt);
+
+        const sops = listSOPs(stateDir);
+        if (sops.length === 0) {
+          return okResult("No SOPs found in Company-brain.");
+        }
+
+        const findings: string[] = [];
+        let recommendedNudge: string | undefined;
+
+        for (const relPath of sops) {
+          const fullPath = stateDir.path("Company-brain", "SOPs", relPath);
+          const content = fs.readFileSync(fullPath, "utf8");
+          const doc = parseSOP(content);
+          if (!doc) continue;
+
+          const sopKey = relPath.replace(/\.md$/, "");
+          const pipe = store.bySop(sopKey);
+          const classification = doc.frontmatter.execution_classification;
+          const roleMap = doc.body.role_map ?? buildSOPRoleMap(classification, doc.body.steps, doc.frontmatter.title);
+
+          // 1. Check for disconnected tools
+          if (composio && doc.frontmatter.required_tools_or_skills.length > 0) {
+            const status = await checkToolAvailability(doc, composio);
+            const missing = Object.entries(status)
+              .filter(([, st]) => st === "not_connected")
+              .map(([t]) => t);
+            if (missing.length > 0) {
+              findings.push(`SOP "${doc.frontmatter.title}" (${classification}) has disconnected tools: ${missing.join(", ")}.`);
+              if (!recommendedNudge) {
+                recommendedNudge =
+                  `Heads up for "${doc.frontmatter.title}" (${classification}): ${missing.join(", ")} isn't connected yet. ` +
+                  `${roleMap.userSummary} Want a connect link so I can handle my part? (yes/skip)`;
+              }
+            }
+          }
+
+          // 2. Check for graduation candidate (5+ consecutive approvals in Hybrid mode)
+          if (
+            classification === "Hybrid" &&
+            pipe &&
+            (pipe.consecutiveCheckpointApprovals ?? 0) >= 5
+          ) {
+            findings.push(
+              `SOP "${doc.frontmatter.title}" has ${pipe.consecutiveCheckpointApprovals} consecutive checkpoint approvals — ready to graduate to Fully_Automated.`,
+            );
+            if (!recommendedNudge) {
+              recommendedNudge =
+                `You've approved the human checkpoint in "${doc.frontmatter.title}" ${pipe.consecutiveCheckpointApprovals} times in a row without edits. ` +
+                `Want to take yourself out of the loop and switch it to Fully Automated? (yes/no)`;
+            }
+          }
+
+          // 3. Check for uncompiled / unscheduled SOPs
+          const isCompiled =
+            pipe?.stages?.dsl?.status === "created" ||
+            pipe?.stages?.dsl?.status === "done";
+          const isScheduled = Boolean(pipe?.schedule?.cron);
+
+          if (!isCompiled && !isScheduled) {
+            findings.push(`SOP "${doc.frontmatter.title}" (${classification}) is documented but not yet active/scheduled.`);
+            if (!recommendedNudge) {
+              if (classification === "Manual") {
+                recommendedNudge =
+                  `Saved SOP "${doc.frontmatter.title}" (Manual). ${roleMap.userSummary} ` +
+                  `Want me to set up a recurring checklist reminder to walk you through Step 1? (yes/no/skip)`;
+              } else if (classification === "Hybrid") {
+                recommendedNudge =
+                  `New Hybrid SOP "${doc.frontmatter.title}" is ready to wire up. ${roleMap.userSummary} ` +
+                  `Want me to start prepping the automated steps now or put it on a daily schedule? (run now/schedule/skip)`;
+              } else {
+                recommendedNudge =
+                  `New Fully Automated SOP "${doc.frontmatter.title}" is ready. ${roleMap.userSummary} ` +
+                  `Want me to activate it to run now or on a schedule? (run now/schedule/skip)`;
+              }
+            }
+          }
+        }
+
+        if (!recommendedNudge) {
+          return okResult("All SOPs are active and up to date. No proactive nudge needed.");
+        }
+
+        if (!gate.allowed) {
+          return okResult(
+            `Findings:\n- ${findings.join("\n- ")}\nNudge suppressed by nudge_gate (${gate.reason}).`,
+          );
+        }
+
+        writeNudgeState(stateDir, { lastNudgeAt: new Date().toISOString() });
+        return okResult(
+          `Nudge allowed and recorded.\n` +
+            `Findings:\n- ${findings.join("\n- ")}\n\n` +
+            `Recommended Nudge to Owner:\n${recommendedNudge}`,
+        );
+      }
+
+      return errResult(`Unknown action: ${String(a.action)}`);
     },
   });
 }

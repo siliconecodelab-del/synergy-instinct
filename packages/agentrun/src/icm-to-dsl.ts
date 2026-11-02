@@ -73,12 +73,28 @@ function stageObjective(content: string): string {
   return "Stage contract";
 }
 
+/** Detect whether a stage contract specifies a human checkpoint or person check. */
+export function isHumanCheckpointStage(content: string): boolean {
+  if (/\*\*Checkpoint:\*\*\s*Yes/i.test(content)) return true;
+  if (/\*\*Owner:\*\*\s*Human/i.test(content)) return true;
+  const checkSectionMatch = content.match(/##\s+Check\s*\n+([\s\S]*?)(?=\n##\s+|$)/i);
+  if (checkSectionMatch) {
+    const checkBody = checkSectionMatch[1]!;
+    if (/\b(person|human|owner|operator|you|approve|sign-off|sign off|review)\b/i.test(checkBody)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Convert an ICM workspace to an AgentRun DSL workflow. */
 export function icmToDsl(icmRoot: string, options?: {
   /** Task name for the workflow. Defaults to derived from ICM root. */
   name?: string;
   /** Task to trace (preflight). Defaults to the ICM root path. */
   task?: string;
+  /** Originating SOP execution classification (Manual | Hybrid | Fully_Automated). */
+  classification?: "Manual" | "Hybrid" | "Fully_Automated";
 }): IcmToDslResult {
   if (!existsSync(icmRoot)) {
     throw new Error(`ICM root not found: ${icmRoot}`);
@@ -119,12 +135,17 @@ export function icmToDsl(icmRoot: string, options?: {
     const stagePath = join(icmRoot, stageRef);
     const content = readFileSafe(stagePath) || "";
     const asKey = `stage_${slugify(stageRef)}`;
+    const label = stageObjective(content) || stageRef;
+    const needsHumanGate =
+      options?.classification === "Manual" ||
+      (options?.classification !== "Fully_Automated" && isHumanCheckpointStage(content));
+
     stageNodes.push({
-      label: stageObjective(content) || stageRef,
+      label,
       as: asKey,
       node: {
         node: "agent",
-        label: stageObjective(content) || stageRef,
+        label,
         instructions: content || `No content found for stage contract ${stageRef}.`,
         state: {
           stageRef,
@@ -142,6 +163,18 @@ export function icmToDsl(icmRoot: string, options?: {
         },
       },
     });
+
+    if (needsHumanGate) {
+      stageNodes.push({
+        label: `human_check_${slugify(stageRef)}`,
+        as: `${asKey}_human_check`,
+        node: {
+          node: "escalate",
+          label: `human_check_${slugify(stageRef)}`,
+          summary: `Human checkpoint (${label}): Your review or sign-off is required before continuing.`,
+        },
+      });
+    }
   }
 
   // If no stages found, create a single catch-all agent node from the entry file

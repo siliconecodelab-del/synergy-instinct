@@ -31,6 +31,7 @@ export interface PipelineSchedule {
 export interface PipelineRecord {
   id: string;
   sop: string;
+  classification?: "Manual" | "Hybrid" | "Fully_Automated";
   mode: "auto" | "guided";
   stages: {
     sop?: PipelineStageRecord;
@@ -38,6 +39,8 @@ export interface PipelineRecord {
     trace?: PipelineStageRecord;
     dsl?: PipelineStageRecord;
   };
+  /** Consecutive times a Hybrid human checkpoint was approved without edits (for graduation nudges). */
+  consecutiveCheckpointApprovals?: number;
   lastPrompt?: string;
   lastRun?: string | null;
   schedule?: PipelineSchedule | null;
