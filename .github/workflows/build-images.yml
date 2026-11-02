@@ -44,19 +44,7 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push agent (test image name)
-        if: matrix.image.name == 'open-instinct-agent'
-        run: |
-          docker buildx build \
-            --file ${{ matrix.image.dockerfile }} \
-            --platform linux/amd64 \
-            --tag ghcr.io/${{ github.repository_owner }}/agent-test:latest \
-            --push \
-            --progress=plain \
-            .
-
-      - name: Build and push gateway
-        if: matrix.image.name != 'open-instinct-agent'
+      - name: Build and push image
         run: |
           TAG=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:latest
           docker buildx build \
