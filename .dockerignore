@@ -1,7 +1,6 @@
 # Build context for deploy/Dockerfile.*. Dependencies are installed inside the image.
 node_modules
 **/node_modules
-**/dist
 .git
 .instinct
 .instinct-*
