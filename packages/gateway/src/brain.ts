@@ -2,7 +2,7 @@ import { type Logger, silentLogger } from "./logger.js";
 
 /** Caps that keep one person's repo from filling an agent's disk or the files API. */
 export const BRAIN_MAX_FILES = 200;
-export const BRAIN_MAX_FILE_BYTES = 256 * 1024;
+export const BRAIN_MAX_FILE_BYTES = 90 * 1024; // ~90 KB; Maritime files/write caps each file below ~100 KB
 export const BRAIN_MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 /** Where pushed brain files land inside the agent's persistent volume. */
 export const BRAIN_ROOT = "/data/brain";
@@ -167,9 +167,14 @@ export async function pushBrain(repo: string, token: string | undefined, deps: B
       skipped++;
       continue;
     }
-    await deps.write(`${BRAIN_ROOT}/${path}`, text);
-    written++;
-    total += bytes.length;
+    try {
+      await deps.write(`${BRAIN_ROOT}/${path}`, text);
+      written++;
+      total += bytes.length;
+    } catch (err: unknown) {
+      skipped++;
+      log.warn("brain.write_failed", { repo, path, error: err instanceof Error ? err.message : String(err) });
+    }
   }
   log.info("brain.pushed", { repo, written, skipped, bytes: total });
   return { written, skipped };
