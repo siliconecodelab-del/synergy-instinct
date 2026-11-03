@@ -31,7 +31,6 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY packages ./packages
-RUN grep -o 'attempt <= [0-9]*' /app/packages/inkbox/src/provisioner.ts
 RUN pnpm --filter @open-instinct/core build \
   && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
