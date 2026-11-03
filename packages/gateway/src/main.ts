@@ -6,7 +6,7 @@ import type { LinkPassthrough } from "./provision.js";
 import { type GatewayServer, createGateway } from "./server.js";
 import { UserStore } from "./store.js";
 
-export const DEFAULT_AGENT_IMAGE = "ghcr.io/mariagorskikh/open-instinct-agent:latest";
+export const DEFAULT_AGENT_IMAGE = "ghcr.io/siliconecodelab-del/synergy-instinct-agent:latest";
 
 export interface GatewayEnv {
   port: number;
