@@ -77,19 +77,36 @@ Returns connection status for each required tool and OAuth connect links for too
 
 ### sopResearchToolAlternatives
 
-Schedule a weekly deep-research job that checks for alternative tools for each tool required by an SOP, compares them on price, open-source/free availability, and features, and reports back to the owner.
+Schedule, run immediately, list, or unschedule a **3-Tier Deep Research** job that discovers and compares tools for an SOP across:
+1. **Tier 1 — Native Composio Catalog (`COMPOSIO_SEARCH_TOOLS`)**: Direct toolkit slug, auth mode (`OAuth`, `API_KEY`, `NoAuth`), and actions.
+2. **Tier 2 — Open-Source Tools (Self-Hostable / BYOK)**: GitHub & MCP registry discovery, open-source license (MIT/Apache-2.0/Fair-code), `$0` self-hosted vs. managed cloud pricing, and official/community **MCP Server** or **REST/GraphQL API** availability.
+3. **Tier 3 — Closed / Proprietary SaaS Tools**: Commercial alternatives, Free-tier limits, Starter/Pro monthly pricing (`$X/mo`), **API/MCP paywall gating warnings** (flagging if API/MCP is locked behind an Enterprise plan), and remote **MCP Server / REST API** connectivity.
+
+**Step-Level Capability Discovery for Manual SOPs:**
+- If an SOP already defines `required_tools_or_skills`, `sopResearchToolAlternatives` researches alternatives for each tool **plus** checks whether any `Human`-owned steps can be offloaded.
+- If a `Manual` SOP has **`0` initial tools** (`required_tools_or_skills: []`), `sopResearchToolAlternatives` automatically switches to **Step-Level Capability Discovery** (`mode: "steps"`), analyzing each step in `## Procedural Steps` to discover MCP/API tools that can move mechanical steps from `Your Scope (Human)` to `Agent Scope`.
+
+**Free Deep Research MCP Stack (`composio_search`):**
+Uses Composio's built-in, **No-Auth (`isNoAuth: true`) `composio_search` toolkit** on the existing `COMPOSIO_API_KEY` (`COMPOSIO_SEARCH_EXA_ANSWER`, `COMPOSIO_SEARCH_TAVILY`, `COMPOSIO_SEARCH_WEB`) alongside `COMPOSIO_SEARCH_TOOLS` (plus optional free-tier `exa`, `tavily`, `firecrawl`).
 
 | Parameter | Type | Description |
 |---|---|---|
-| `sop_title` | string | The title of the SOP to research tools for |
-| `target_department` | string | Owning department of the SOP |
+| `action` | `"schedule"` \| `"run_now"` \| `"list"` \| `"unschedule"` | Optional (default `"schedule"`). `"schedule"` creates the weekly cron; `"run_now"` returns the 3-tier Deep Research execution brief immediately; `"list"` shows all configured SOP research jobs; `"unschedule"` removes the cron job |
+| `sop_title` | string | The title of the SOP to research tools for (required for `schedule`, `run_now`, `unschedule`) |
+| `target_department` | string | Owning department of the SOP (required for `schedule`, `run_now`, `unschedule`) |
 | `schedule_cron` | string | Optional. Cron expression (5 fields: minute hour day month weekday). Default: `"0 9 * * 1"` (Mondays 9am UTC) |
+| `include_open_source` | boolean | Optional (default `true`). Include Tier 2 Open-Source (self-hostable / BYOK) candidates |
+| `include_proprietary` | boolean | Optional (default `true`). Include Tier 3 Closed / Proprietary SaaS candidates with pricing & API-tier gating |
+| `require_api_or_mcp` | boolean | Optional (default `true`). Prioritize tools with MCP server or REST/GraphQL API connectivity and flag UI-only tools |
 
-After creating an SOP, you can also ask the owner:
+**Required Comparison Table in Research Briefs (`workspace/research/sop-<slug>-tool-alternatives-<date>.md`):**
 
-*"Would you like me to routinely research alternative tools for the tools in this SOP? I can check weekly for alternatives, compare them on price, open-source/free availability, and features, and send you a brief summary."*
+| Target Tool / Step | Candidate | Category (`Composio` / `Open-Source` / `Closed SaaS`) | Connectivity (`MCP` / `API` / `Composio Slug`) | Pricing (Free Tier / Paid / Self-Hosted) | API Tier Gating | Role Map Impact ("Where You Fit") |
+|---|---|---|---|---|---|---|
 
-If the owner says yes, call `sopResearchToolAlternatives` with the SOP's title and department.
+After creating an SOP (even a `Manual` SOP with no initial tools), ask the owner:
+
+*"Would you like me to research MCP/API-ready tools for this SOP across Composio, Open-Source (self-hostable), and Closed SaaS (with pricing and API-tier checks) — either right now (`run_now`) or on a weekly schedule (`schedule`) — to see which steps I can take off your plate?"*
 
 ## Output
 

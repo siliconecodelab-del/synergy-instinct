@@ -23,6 +23,7 @@ import {
   serializeSOP,
   type ExecutionClassification,
   type ComposioLike,
+  type SOPDocument,
   parseSOP,
 } from "./sop-okf.js";
 import {
@@ -320,13 +321,13 @@ export function sopArchitectTool(deps: {
             writeSOP(stateDir, updatedDoc, { overwrite: true });
             const connected = Object.entries(toolStatus)
               .filter(([, s]) => s === "connected")
-                .map(([t]) => t);
+              .map(([t]) => t);
             const notConnected = Object.entries(toolStatus)
               .filter(([, s]) => s === "not_connected")
               .map(([t]) => t);
             const notConfigured = Object.entries(toolStatus)
               .filter(([, s]) => s === "not_configured")
-                .map(([t]) => t);
+              .map(([t]) => t);
             let statusLines = [
               `SOP "${args.sop_title}" written to ${path} (OKF v1.0.0, ${doc.frontmatter.execution_classification}).`,
               ...roleMapLines,
@@ -450,10 +451,140 @@ export function sopCheckRequiredToolsTool(deps: {
 }
 
 /**
- * Build the `sopResearchToolAlternatives` RegisteredTool: schedules a weekly
- * deep-research job that checks for alternative tools for each tool required
- * by an SOP, compares them on price, open-source/free availability, and
- * features, and reports back to the owner.
+ * Composio Deep Research MCP toolkits used by the Unstructured Research Spectrum:
+ * - `composio_search`: Free, No-Auth (`isNoAuth: true`) unified search toolkit providing
+ *   `COMPOSIO_SEARCH_EXA_ANSWER` (Exa semantic answer engine),
+ *   `COMPOSIO_SEARCH_TAVILY` (Tavily LLM deep research), and
+ *   `COMPOSIO_SEARCH_WEB` (multi-engine web + URL markdown extraction).
+ * - `exa`, `tavily`, `firecrawl`: Optional BYOK free-tier deep research & pricing scrapers.
+ */
+export const DEEP_RESEARCH_TOOLKITS = ["composio_search", "exa", "tavily", "firecrawl"] as const;
+
+export interface SOPToolResearchOptions {
+  includeOpenSource?: boolean;
+  includeProprietary?: boolean;
+  requireApiOrMcp?: boolean;
+}
+
+export interface SOPToolResearchPlan {
+  prompt: string;
+  targets: string[];
+  humanStepTargets: string[];
+  mode: "tools" | "steps";
+}
+
+/**
+ * Build the 3-tier Deep Research prompt for an SOP, supporting both explicit
+ * `required_tools_or_skills` and step-level capability discovery (so Manual SOPs
+ * with 0 initial tools can discover MCP/API tools that offload human steps into Agent Scope).
+ */
+export function buildSOPToolResearchPrompt(
+  doc: SOPDocument,
+  options: SOPToolResearchOptions = {},
+): SOPToolResearchPlan {
+  const includeOpenSource = options.includeOpenSource ?? true;
+  const includeProprietary = options.includeProprietary ?? true;
+  const requireApiOrMcp = options.requireApiOrMcp ?? true;
+
+  const tools = (doc.frontmatter.required_tools_or_skills ?? []).filter(Boolean);
+  const steps = doc.body.steps ?? [];
+  const humanSteps = steps.filter(
+    (s) =>
+      s.checkpoint ||
+      !s.owner ||
+      s.owner.toLowerCase().includes("human") ||
+      doc.frontmatter.execution_classification === "Manual",
+  );
+  const humanStepTargets = humanSteps.map((s) => `Step ${s.step}: ${s.description}`);
+
+  const mode: "tools" | "steps" = tools.length > 0 ? "tools" : "steps";
+  const targets =
+    tools.length > 0
+      ? tools
+      : steps.length > 0
+        ? steps.map((s) => `Step ${s.step}: ${s.description}`)
+        : [doc.frontmatter.core_objective || doc.frontmatter.title];
+
+  const roleMap =
+    doc.body.role_map ??
+    buildSOPRoleMap(doc.frontmatter.execution_classification, steps, doc.frontmatter.title);
+
+  const targetSection =
+    mode === "tools"
+      ? `The SOP currently requires these tools/skills: ${tools.join(", ")}.\n` +
+      (humanStepTargets.length > 0
+        ? `Additionally, inspect these Human-owned steps to see if any MCP/API tool can offload mechanical prep to Agent Scope:\n  - ${humanStepTargets.join("\n  - ")}`
+        : "")
+      : `This ${doc.frontmatter.execution_classification} SOP currently lists no explicit tools (0 initial tools). ` +
+      `Perform step-level capability discovery for the SOP objective ("${doc.frontmatter.core_objective}") and its procedural steps:\n  - ${targets.join("\n  - ")}\n` +
+      `Identify MCP/API-compatible tools that can automate or assist these steps and shift mechanical work from Your Scope (Human) to Agent Scope.`;
+
+  const tierMandates: string[] = [
+    `1. **Tier 1 — Native Composio Catalog (\`COMPOSIO_SEARCH_TOOLS\`)**:\n` +
+    `   - Query \`COMPOSIO_SEARCH_TOOLS\` for direct toolkit slugs matching the capability.\n` +
+    `   - Record toolkit slug, auth mode (\`OAuth\`, \`API_KEY\`, or \`NoAuth\`), and key actions.`,
+  ];
+
+  if (includeOpenSource) {
+    tierMandates.push(
+      `2. **Tier 2 — Open-Source Tools (Self-Hostable / BYOK)**:\n` +
+      `   - Use Deep Research (\`COMPOSIO_SEARCH_EXA_ANSWER\`, \`COMPOSIO_SEARCH_TAVILY\`, \`COMPOSIO_SEARCH_WEB\`) to find 1-2 actively maintained open-source tools or MCP servers on GitHub.\n` +
+      `   - **Pricing & Licensing**: State the open-source license (MIT, Apache-2.0, Fair-code, etc.), self-hosted cost (\`$0\` / BYOK infra), and managed cloud pricing if offered.\n` +
+      `   - **Connectivity**: Verify whether it ships an official/community **MCP Server** (\`npx\` / \`uvx\` / Docker) or a **REST / GraphQL / Webhook API**.`,
+    );
+  }
+
+  if (includeProprietary) {
+    tierMandates.push(
+      `${includeOpenSource ? "3" : "2"}. **Tier 3 — Closed / Proprietary SaaS Tools**:\n` +
+      `   - Use Deep Research (\`COMPOSIO_SEARCH_EXA_ANSWER\`, \`COMPOSIO_SEARCH_TAVILY\`, \`COMPOSIO_SEARCH_WEB\`) to find 1-2 leading commercial SaaS alternatives and extract their live \`/pricing\` and \`/docs\` details.\n` +
+      `   - **Pricing & API-Tier Gating**: State exact Free-tier limits, Starter/Pro monthly pricing (\`$X/mo\` or usage rate), and **explicitly warn if API or MCP access is gated behind a higher/Enterprise plan**.\n` +
+      `   - **Connectivity**: Verify whether it offers a remote **MCP Server**, a **Composio toolkit**, or a **REST / GraphQL API**.`,
+    );
+  }
+
+  const connectivityFilter = requireApiOrMcp
+    ? `CRITICAL FILTER: Prioritize and recommend ONLY tools that expose **MCP Server connectivity** (local stdio or remote SSE/HTTP) or a **documented REST/GraphQL API** so the agent can actually invoke them. Flag UI-only tools with no API/MCP as incompatible with agent automation.`
+    : `Prefer tools that expose MCP Server connectivity or a documented REST/GraphQL API.`;
+
+  const prompt = [
+    `Deep-Research Tool Discovery & Alternatives for SOP "${doc.frontmatter.title}" (${doc.frontmatter.department}) [Classification: ${doc.frontmatter.execution_classification}].`,
+    ``,
+    targetSection,
+    ``,
+    `Current Role Map ("Where You Fit vs. Where the Agent Fits"):`,
+    `- Your Scope (Human): ${roleMap.humanScope}`,
+    `- Agent Scope: ${roleMap.agentScope}`,
+    `- Cadence & Nudges: ${roleMap.cadenceAndNudges}`,
+    `- Summary for Owner: ${roleMap.userSummary}`,
+    ``,
+    `### Deep Research Execution Protocol (Composio Free Deep Research MCP)`,
+    `Use the **Composio Deep Research toolkit (\`composio_search\`)** — which requires No Auth on the existing \`COMPOSIO_API_KEY\` — alongside \`COMPOSIO_SEARCH_TOOLS\`:`,
+    `- Call \`COMPOSIO_SEARCH_TOOLS\` for native Composio catalog discovery.`,
+    `- Call \`COMPOSIO_SEARCH_EXA_ANSWER\` and \`COMPOSIO_SEARCH_TAVILY\` (or \`context_answers\` / \`web_search\`) to research open-source GitHub repositories, MCP registries, and live SaaS pricing/API docs.`,
+    ``,
+    `### Mandatory 3-Part Search & Comparison Mandate`,
+    `For each target capability or tool, evaluate candidates across:`,
+    ...tierMandates,
+    ``,
+    connectivityFilter,
+    ``,
+    `### Required Output & Role Map Impact`,
+    `Write a structured research brief to \`workspace/research/sop-${kebabCase(doc.frontmatter.title)}-tool-alternatives-<date>.md\` containing:`,
+    `1. **3-Tier Comparison Table** with columns: \`Target Tool / Step\` | \`Candidate\` | \`Category (Composio / Open-Source / Closed SaaS)\` | \`Connectivity (MCP / API / Composio Slug)\` | \`Pricing (Free Tier / Paid / Self-Hosted)\` | \`API Tier Gating\` | \`Role Map Impact ("Where You Fit")\`.`,
+    `2. **Role Map Shift Recommendation**: Explain which steps in "${doc.frontmatter.title}" can move from \`Your Scope (Human)\` to \`Agent Scope\` (e.g. upgrading a \`Manual\` SOP to \`Hybrid\`, or a \`Hybrid\` SOP to \`Fully_Automated\`) if the recommended MCP/API tool is connected.`,
+    `3. **Owner Nudge (Gated)**: Check \`nudge_gate\` (\`action: "check"\`). If allowed, send the owner a concise summary (current vs. best Open-Source & Closed/Proprietary option, exact pricing, MCP/API readiness, and how it reduces their manual steps) and call \`nudge_gate\` (\`action: "record"\`).`,
+  ].join("\n");
+
+  return { prompt, targets, humanStepTargets, mode };
+}
+
+/**
+ * Build the `sopResearchToolAlternatives` RegisteredTool: schedules or runs a
+ * deep-research job across Native Composio tools, Open-Source tools, and
+ * Closed/Proprietary SaaS tools (with pricing, API-tier gating, MCP/API
+ * connectivity priority, and SOP Role Map impact). Supports both explicit
+ * `required_tools_or_skills` and step-level capability discovery for Manual SOPs.
  */
 export function sopResearchToolAlternativesTool(deps: {
   stateDir: StateDir;
@@ -463,34 +594,147 @@ export function sopResearchToolAlternativesTool(deps: {
 
   return defineTool({
     name: "sopResearchToolAlternatives",
-    label: "Research SOP tool alternatives",
+    label: "Research SOP tool alternatives (Composio + Open-Source + Closed SaaS)",
     description:
-      "Schedule a weekly deep-research job that checks for alternative tools " +
-      "for each tool required by an SOP, compares them on price, open-source/" +
-      "free availability, and features, and reports back to the owner. " +
-      "Parameters: sop_title, target_department, schedule_cron (optional, " +
-      'default "0 9 * * 1" = Mondays 9am).',
+    "Schedule, run immediately, list, or unschedule deep-research jobs that discover and compare " +
+      "tools for an SOP across (1) Native Composio catalog, (2) Open-Source (self-hostable / BYOK), and " +
+      "(3) Closed/Proprietary SaaS — including pricing, API/MCP tier gating, MCP/API connectivity, and " +
+      "how each tool shifts steps in the SOP's Role Map ('Where You Fit vs. Where the Agent Fits'). " +
+      "Works both for SOPs with `required_tools_or_skills` and Manual SOPs with 0 initial tools (via step-level discovery).",
     parameters: Type.Object({
-      sop_title: Type.String({ description: "The title of the SOP to research tools for." }),
-      target_department: Type.String({
-        description: "Owning department of the SOP.",
-      }),
+      action: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("schedule"),
+            Type.Literal("run_now"),
+            Type.Literal("list"),
+            Type.Literal("unschedule"),
+          ],
+          {
+            description:
+              'Action to perform: "schedule" (default, creates weekly cron), "run_now" (returns the 3-tier Deep Research plan for immediate execution), "list" (lists configured SOP research jobs), or "unschedule" (removes the scheduled job).',
+          },
+        ),
+      ),
+      sop_title: Type.Optional(
+        Type.String({ description: "The title of the SOP to research tools for (required for schedule, run_now, unschedule)." }),
+      ),
+      target_department: Type.Optional(
+        Type.String({
+          description: "Owning department of the SOP (required for schedule, run_now, unschedule).",
+        }),
+      ),
       schedule_cron: Type.Optional(
         Type.String({
           description:
-            "Cron expression for the research schedule (5 fields: minute hour day month weekday). Default: weekly Mondays 9am.",
+          'Cron expression for the research schedule (5 fields: minute hour day month weekday). Default: "0 9 * * 1" (Mondays 9am UTC).',
+        }),
+      ),
+      include_open_source: Type.Optional(
+        Type.Boolean({
+          description: "Include Tier 2 Open-Source (self-hostable / BYOK) tool discovery (default: true).",
+        }),
+      ),
+      include_proprietary: Type.Optional(
+        Type.Boolean({
+          description: "Include Tier 3 Closed / Proprietary SaaS tool discovery with pricing & API-tier gating (default: true).",
+        }),
+      ),
+      require_api_or_mcp: Type.Optional(
+        Type.Boolean({
+          description: "Prioritize tools with MCP server or REST/GraphQL API connectivity (default: true).",
         }),
       ),
     }),
     meta: {
       capabilities: ["converse"],
       group: "system",
-      describe: (args) =>
-        `sopResearchToolAlternatives ${String((args as { sop_title?: unknown }).sop_title ?? "")}`,
+      describe: (args) => {
+        const a = args as { action?: string; sop_title?: string };
+        return `sopResearchToolAlternatives ${a.action ?? "schedule"} ${a.sop_title ?? ""}`.trim();
+      },
     },
     execute: async (args) => {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const path = require("node:path") as typeof import("node:path");
+      const action = args.action ?? "schedule";
+      const configDir = stateDir.path("agentrun", "sop-research");
+
+      // ------------------------------------------------------------------
+      // list — show all configured SOP tool-research jobs
+      // ------------------------------------------------------------------
+      if (action === "list") {
+        if (!fs.existsSync(configDir)) {
+          return okResult("No SOP tool-research schedules configured.");
+        }
+        const files = fs.readdirSync(configDir).filter((f: string) => f.endsWith(".json"));
+        if (files.length === 0) {
+          return okResult("No SOP tool-research schedules configured.");
+        }
+        const lines: string[] = [];
+        for (const file of files) {
+          try {
+            const cfg = JSON.parse(fs.readFileSync(path.join(configDir, file), "utf8"));
+            const targetsList = Array.isArray(cfg.targets)
+              ? cfg.targets.join(", ")
+              : Array.isArray(cfg.tools)
+                ? cfg.tools.join(", ")
+                : "none";
+            lines.push(
+              `${cfg.target_department}/${cfg.sop_title} | mode=${cfg.mode ?? "tools"} | cron="${cfg.schedule_cron ?? "none"}" | scheduled=${cfg.scheduled !== false} | targets=[${targetsList}]`,
+            );
+          } catch {
+            // ignore malformed config file
+          }
+        }
+        return okResult(lines.length > 0 ? lines.join("\n") : "No SOP tool-research schedules configured.");
+      }
+
+      if (!args.sop_title || !args.target_department) {
+        return errResult(`Both "sop_title" and "target_department" are required for action "${action}".`);
+      }
+
+      const configPath = stateDir.path(
+        "agentrun",
+        "sop-research",
+        `${kebabCase(args.target_department)}-${kebabCase(args.sop_title)}.json`,
+      );
+      const researchId = `sop-research-${kebabCase(args.sop_title)}-${kebabCase(args.target_department)}`;
+
+      // ------------------------------------------------------------------
+      // unschedule — remove the Scheduler job and mark config unscheduled
+      // ------------------------------------------------------------------
+      if (action === "unschedule") {
+        let removedJobId: string | undefined;
+        if (fs.existsSync(configPath)) {
+          try {
+            const existing = JSON.parse(fs.readFileSync(configPath, "utf8"));
+            if (existing.jobId) {
+              scheduler.delete(existing.jobId);
+              removedJobId = existing.jobId;
+            }
+            existing.scheduled = false;
+            delete existing.jobId;
+            fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+          } catch {
+            // ignore
+          }
+        }
+        for (const job of scheduler.list()) {
+          if (job.name === researchId) {
+            scheduler.delete(job.id);
+            removedJobId = job.id;
+          }
+        }
+        return okResult(
+          `Unscheduled tool-alternative research for SOP "${args.sop_title}" (${args.target_department})${removedJobId ? ` [jobId: ${removedJobId}]` : ""}.`,
+        );
+      }
+
+      // ------------------------------------------------------------------
+      // schedule | run_now — parse SOP and build 3-tier Deep Research plan
+      // ------------------------------------------------------------------
       const sopPath = resolveSOPPath(stateDir, args.target_department, args.sop_title);
-      const fs = require("node:fs");
       if (!fs.existsSync(sopPath)) {
         return errResult(`SOP not found at ${sopPath}.`);
       }
@@ -501,74 +745,101 @@ export function sopResearchToolAlternativesTool(deps: {
         return errResult(`Failed to parse SOP at ${sopPath}.`);
       }
 
-      const tools = doc.frontmatter.required_tools_or_skills;
-      if (!tools || tools.length === 0) {
-        return errResult(
-          `SOP "${args.sop_title}" has no required tools to research alternatives for.`,
-        );
-      }
+      const plan = buildSOPToolResearchPrompt(doc, {
+        includeOpenSource: args.include_open_source,
+        includeProprietary: args.include_proprietary,
+        requireApiOrMcp: args.require_api_or_mcp,
+      });
 
       const scheduleCron = args.schedule_cron || "0 9 * * 1";
-      const researchId = `sop-research-${kebabCase(args.sop_title)}-${kebabCase(args.target_department)}`;
+      fs.mkdirSync(configDir, { recursive: true });
 
-      // Save research config
-      const researchConfig = {
-        sop_title: args.sop_title,
-        target_department: args.target_department,
-        tools,
-        schedule_cron: scheduleCron,
-        created_at: new Date().toISOString(),
-      };
-      const configPath = stateDir.path(
-        "agentrun",
-        "sop-research",
-        `${kebabCase(args.target_department)}-${kebabCase(args.sop_title)}.json`,
-      );
-      const configDir = stateDir.path("agentrun", "sop-research");
-      require("node:fs").mkdirSync(configDir, { recursive: true });
-      require("node:fs").writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
+      if (action === "run_now") {
+        const researchConfig = {
+          sop_title: args.sop_title,
+          target_department: args.target_department,
+          classification: doc.frontmatter.execution_classification,
+          mode: plan.mode,
+          tools: doc.frontmatter.required_tools_or_skills ?? [],
+          targets: plan.targets,
+          human_step_targets: plan.humanStepTargets,
+          deep_research_toolkits: [...DEEP_RESEARCH_TOOLKITS],
+          include_open_source: args.include_open_source ?? true,
+          include_proprietary: args.include_proprietary ?? true,
+          require_api_or_mcp: args.require_api_or_mcp ?? true,
+          schedule_cron: scheduleCron,
+          scheduled: false,
+          last_triggered_at: new Date().toISOString(),
+        };
+        fs.writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
 
-      // Create the schedule
-      const schedulePrompt = `
-Research alternative tools for the SOP "${args.sop_title}" (${args.target_department}).
-
-The SOP requires these tools: ${tools.join(", ")}.
-
-For each tool, research:
-1. Alternative/competing tools (2-3 options)
-2. Pricing models and cost comparison
-3. Open-source or free-tier availability
-4. Key features vs the current tool
-5. Integration difficulty
-
-Write a research brief to workspace/research/sop-${kebabCase(args.sop_title)}-tool-alternatives-<date>.md
-with a comparison table and recommendation. Then notify the owner with a short summary
-(one paragraph per tool: current → recommended alternative, key reason, cost impact).
-      `.trim();
-
-      try {
-        scheduler.create({
-          name: researchId,
-          prompt: schedulePrompt,
-          enabled: true,
-          cron: scheduleCron,
-          tz: "UTC",
-        });
-      } catch (err) {
-        return errResult(
-          `Failed to create research schedule: ${err instanceof Error ? err.message : String(err)}`,
+        return okResult(
+          `Ready to execute immediate 3 - Tier Deep Research for SOP "${args.sop_title}"(${ args.target_department })[Discovery Mode: ${ plan.mode === "tools" ? "Required Tools + Human Checkpoints" : "Step-Level Capability Discovery (0 initial tools)" }].\n` +
+            `Deep Research MCP Toolkits: ${ DEEP_RESEARCH_TOOLKITS.join(", ") }(use COMPOSIO_SEARCH_TOOLS, COMPOSIO_SEARCH_EXA_ANSWER, COMPOSIO_SEARCH_TAVILY, COMPOSIO_SEARCH_WEB).\n` +
+            `Config saved to ${ configPath }.\n\n` +
+            `-- - DEEP RESEARCH EXECUTION BRIEF-- -\n` +
+            plan.prompt,
         );
       }
 
-      return okResult(
-        `Scheduled weekly research for SOP "${args.sop_title}" (${args.target_department}).\n` +
-          `Tools being monitored: ${tools.join(", ")}.\n` +
-          `Schedule: ${scheduleCron} (UTC).\n` +
-          `Research config saved to ${configPath}.\n` +
-          `The agent will research alternatives for each tool and report back with comparisons on price, open-source/free availability, and features.`,
+      // action === "schedule"
+      // Remove any prior duplicate job with the same name before creating a fresh one
+      for (const existingJob of scheduler.list()) {
+        if (existingJob.name === researchId) {
+          scheduler.delete(existingJob.id);
+        }
+      }
+
+  let jobId: string;
+  try {
+      const job = scheduler.create({
+        name: researchId,
+        prompt: plan.prompt,
+        enabled: true,
+        cron: scheduleCron,
+        tz: "UTC",
+      });
+      jobId = job.id;
+    } catch (err) {
+      return errResult(
+        `Failed to create research schedule: ${err instanceof Error ? err.message : String(err)}`,
       );
-    },
-  });
+    }
+
+    const researchConfig = {
+      sop_title: args.sop_title,
+      target_department: args.target_department,
+      classification: doc.frontmatter.execution_classification,
+      mode: plan.mode,
+      tools: doc.frontmatter.required_tools_or_skills ?? [],
+      targets: plan.targets,
+      human_step_targets: plan.humanStepTargets,
+      deep_research_toolkits: [...DEEP_RESEARCH_TOOLKITS],
+      include_open_source: args.include_open_source ?? true,
+      include_proprietary: args.include_proprietary ?? true,
+      require_api_or_mcp: args.require_api_or_mcp ?? true,
+      schedule_cron: scheduleCron,
+      scheduled: true,
+      jobId,
+      created_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
+
+    const discoverySummary =
+      plan.mode === "tools"
+        ? `Tools being monitored: ${plan.targets.join(", ")}.`
+        : `Step-level capability targets (Manual/0-tool SOP): ${plan.targets.join(" | ")}.`;
+
+    return okResult(
+      `Scheduled weekly 3-Tier Deep Research for SOP "${args.sop_title}" (${args.target_department}) [jobId: ${jobId}].\n` +
+      `${discoverySummary}\n` +
+      `Deep Research MCP stack: ${DEEP_RESEARCH_TOOLKITS.join(", ")} (Native Composio Catalog + Open-Source BYOK + Closed/Proprietary SaaS with pricing, API-tier gating & MCP/API connectivity).\n` +
+      `Schedule: ${scheduleCron} (UTC).\n` +
+      `Research config saved to ${configPath}.\n` +
+      `The agent will compare candidates across price, open-source/free availability, MCP/API readiness, and Role Map impact ("Where You Fit vs. Where the Agent Fits").`,
+    );
+  },
+});
 }
 
 export function workflowTraceTool(deps: { stateDir: StateDir }): RegisteredTool {
@@ -595,7 +866,7 @@ export function workflowTraceTool(deps: { stateDir: StateDir }): RegisteredTool 
     meta: {
       capabilities: ["files.read"],
       group: "files",
-      describe: (a) => `workflow_trace ${ (a as { subcommand?: string }).subcommand ?? "" }`,
+      describe: (a) => `workflow_trace ${(a as { subcommand?: string }).subcommand ?? ""}`,
     },
     execute: async (args: any): Promise<ToolResultLike> => {
       const a = args as { subcommand: string; args?: string[]; dir?: string };
@@ -1004,7 +1275,7 @@ export function sopProactiveNudgeTool(deps: {
         if (nextCount >= 5 && (record.classification ?? "Hybrid") === "Hybrid") {
           return okResult(
             `Checkpoint approval recorded (${nextCount} consecutive without edits).\n` +
-              `Graduation Nudge Ready: "You've approved the checkpoint in '${a.sop_title}' ${nextCount} times in a row without edits. Want to take yourself out of the loop and graduate this SOP from Hybrid to Fully Automated? (yes/no)"`,
+            `Graduation Nudge Ready: "You've approved the checkpoint in '${a.sop_title}' ${nextCount} times in a row without edits. Want to take yourself out of the loop and graduate this SOP from Hybrid to Fully Automated? (yes/no)"`,
           );
         }
         return okResult(
@@ -1048,7 +1319,7 @@ export function sopProactiveNudgeTool(deps: {
 
         return okResult(
           `Graduated SOP "${doc.frontmatter.title}" to Fully_Automated.\n` +
-            `${doc.body.role_map.userSummary}`,
+          `${doc.body.role_map.userSummary}`,
         );
       }
 
@@ -1146,8 +1417,8 @@ export function sopProactiveNudgeTool(deps: {
         writeNudgeState(stateDir, { lastNudgeAt: new Date().toISOString() });
         return okResult(
           `Nudge allowed and recorded.\n` +
-            `Findings:\n- ${findings.join("\n- ")}\n\n` +
-            `Recommended Nudge to Owner:\n${recommendedNudge}`,
+          `Findings:\n- ${findings.join("\n- ")}\n\n` +
+          `Recommended Nudge to Owner:\n${recommendedNudge}`,
         );
       }
 
