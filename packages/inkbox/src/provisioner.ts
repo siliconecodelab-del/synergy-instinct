@@ -162,7 +162,7 @@ export class InkboxProvisioner {
     }
 
     let withPhone = input.phone ?? false;
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= 20; attempt++) {
       const handle = attempt === 1 ? base : `${base}-${attempt}`;
       const body: Dict = { agent_handle: handle, display_name: input.displayName, imessage_enabled: wantIMessage };
       if (input.description) body.description = input.description;
@@ -189,7 +189,7 @@ export class InkboxProvisioner {
         throw err;
       }
     }
-    throw new Error(`could not find a free handle for "${base}" after 5 attempts`);
+    throw new Error(`could not find a free handle for "${base}" after 20 attempts`);
   }
 
   /** Identity-scoped key for the agent process. Shown once; store it in the agent's env. */
