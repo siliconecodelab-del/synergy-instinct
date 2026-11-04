@@ -86,8 +86,8 @@ Schedule, run immediately, list, or unschedule a **3-Tier Deep Research** job th
 - If an SOP already defines `required_tools_or_skills`, `sopResearchToolAlternatives` researches alternatives for each tool **plus** checks whether any `Human`-owned steps can be offloaded.
 - If a `Manual` SOP has **`0` initial tools** (`required_tools_or_skills: []`), `sopResearchToolAlternatives` automatically switches to **Step-Level Capability Discovery** (`mode: "steps"`), analyzing each step in `## Procedural Steps` to discover MCP/API tools that can move mechanical steps from `Your Scope (Human)` to `Agent Scope`.
 
-**Free Deep Research MCP Stack (`composio_search`):**
-Uses Composio's built-in, **No-Auth (`isNoAuth: true`) `composio_search` toolkit** on the existing `COMPOSIO_API_KEY` (`COMPOSIO_SEARCH_EXA_ANSWER`, `COMPOSIO_SEARCH_TAVILY`, `COMPOSIO_SEARCH_WEB`) alongside `COMPOSIO_SEARCH_TOOLS` (plus optional free-tier `exa`, `tavily`, `firecrawl`).
+**Free Deep Research MCP Stack (`composio_search` + `deep-research` skill):**
+Uses the standalone `deep-research` skill (`load_skill` with `name: "deep-research"`) powered by Composio's built-in, **No-Auth (`isNoAuth: true`) `composio_search` toolkit** on the existing `COMPOSIO_API_KEY` (`COMPOSIO_SEARCH_EXA_ANSWER`, `COMPOSIO_SEARCH_TAVILY`, `COMPOSIO_SEARCH_WEB`) alongside `COMPOSIO_SEARCH_TOOLS` (plus optional free-tier `exa`, `tavily`, `firecrawl`).
 
 | Parameter | Type | Description |
 |---|---|---|

@@ -559,7 +559,7 @@ export function buildSOPToolResearchPrompt(
     `- Summary for Owner: ${roleMap.userSummary}`,
     ``,
     `### Deep Research Execution Protocol (Composio Free Deep Research MCP)`,
-    `Use the **Composio Deep Research toolkit (\`composio_search\`)** — which requires No Auth on the existing \`COMPOSIO_API_KEY\` — alongside \`COMPOSIO_SEARCH_TOOLS\`:`,
+    `Load the \`deep-research\` skill (\`load_skill\` with \`name: "deep-research"\`) and use the **Composio Deep Research toolkit (\`composio_search\`)** — which requires No Auth on the existing \`COMPOSIO_API_KEY\` — alongside \`COMPOSIO_SEARCH_TOOLS\`:`,
     `- Call \`COMPOSIO_SEARCH_TOOLS\` for native Composio catalog discovery.`,
     `- Call \`COMPOSIO_SEARCH_EXA_ANSWER\` and \`COMPOSIO_SEARCH_TAVILY\` (or \`context_answers\` / \`web_search\`) to research open-source GitHub repositories, MCP registries, and live SaaS pricing/API docs.`,
     ``,

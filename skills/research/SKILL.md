@@ -87,10 +87,7 @@ u1-vs-bambu.pdf, 2 pages, in the current iMessage thread)
 - Quick: one search, one fetch, answer in two lines. For "what time zone is
   Lisbon" type questions.
 - Standard: the steps above, 10 minutes of work.
-- Deep: the owner says "dig into this" or the stakes are high (health, money,
-  legal). Read at least five primary sources, note disagreements, and say
-  explicitly where expert advice is needed. Never present medical, legal or
-  financial research as advice; present what the sources say.
+- Deep: the owner says "dig into this", wants a tool/API/vendor comparison (open-source vs. SaaS, pricing, MCP/API support), or the stakes are high (health, money, legal). Load the `deep-research` skill (`load_skill` with `name: "deep-research"`) for multi-engine synthesis via Composio Deep Research (`composio_search`), read at least five primary sources, note disagreements, and say explicitly where expert advice is needed. Never present medical, legal or financial research as advice; present what the sources say.
 
 ## Memory
 

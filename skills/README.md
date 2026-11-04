@@ -20,6 +20,7 @@ skills/
   rides/SKILL.md
   email-triage/SKILL.md
   research/SKILL.md
+  deep-research/SKILL.md
   purchases/SKILL.md
   files/SKILL.md
   daily-brief/SKILL.md
