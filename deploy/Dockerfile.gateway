@@ -2,6 +2,7 @@
 # plus the signup and connect pages. One per deployment, many users.
 ARG CACHEBUST=1
 FROM node:22-slim AS base
+ARG CACHEBUST=1
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN echo "cachebust=$CACHEBUST" && apt-get update \
