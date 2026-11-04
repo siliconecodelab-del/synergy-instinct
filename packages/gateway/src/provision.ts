@@ -85,7 +85,7 @@ export interface ProvisionDeps {
 }
 
 /** What agentEnvFor and maritimeCreateBody need from the deps. */
-export type AgentEnvDeps = Pick<ProvisionDeps, "anthropicApiKey" | "composioApiKey" | "composioToolkits" | "composio" | "maritime" | "link" | "inkboxBaseUrl" | "template"> & {
+export type AgentEnvDeps = Pick<ProvisionDeps, "anthropicApiKey" | "composioApiKey" | "composioToolkits" | "composio" | "maritime" | "link" | "inkboxBaseUrl" | "template" | "githubToken"> & {
   publicUrl?: string;
 };
 
@@ -191,7 +191,8 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
     if (deps.link.stripePublishableKey) env.push({ key: "STRIPE_PUBLISHABLE_KEY", value: deps.link.stripePublishableKey, isSecret: false });
     if (deps.publicUrl) env.push({ key: "LINK_REDIRECT_URI", value: linkRedirectUriFor(deps.publicUrl, user.id), isSecret: false });
   }
-  env.push({ key: "INSTINCT_COMPUTER", value: "auto", isSecret: false });
+  if (deps.githubToken || user.brainToken) env.push({ key: "GITHUB_TOKEN", value: (user.brainToken || deps.githubToken)!, isSecret: true });
+  if (user.brainRepo) env.push({ key: "BRAIN_REPO", value: user.brainRepo, isSecret: false });
   // Fleet isolation: a narrow computers-scoped key, never the fleet key.
   if (deps.maritime.computersKey) upsertEnv(env, "MARITIME_API_KEY", deps.maritime.computersKey);
   for (const [key, value] of Object.entries(deps.maritime.extraEnv ?? {})) {

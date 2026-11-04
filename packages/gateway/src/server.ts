@@ -490,6 +490,7 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       composioApiKey: opts.composioApiKey,
       composioToolkits: opts.composioToolkits,
       composio: opts.composio,
+      githubToken: opts.githubToken,
       link: opts.link,
       template: templates.get(user.templateId),
       fetchImpl: opts.fetchImpl,

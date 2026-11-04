@@ -5,6 +5,7 @@
  * embedders can drive it the same way.
  */
 import { resolve } from "node:path";
+import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
@@ -117,6 +118,55 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   // replaces it as long as the owner never edited the file; an edited file is theirs.
   const instructions = syncInstructions(state, env.INSTINCT_INSTRUCTIONS);
   if (instructions === "created" || instructions === "updated") log(`${instructions} ${state.path("AGENTS.md")} from INSTINCT_INSTRUCTIONS`);
+
+  // Git/GitHub setup for company brain version control.
+  // If BRAIN_REPO is set, ensure /data/brain is a git clone so the agent can
+  // pull updates and push changes back via bash (git add/commit/push).
+  if (env.BRAIN_REPO && env.GITHUB_TOKEN) {
+    try {
+      const brainDir = state.path("brain");
+      const gitDir = state.path("brain", ".git");
+      const repoUrl = `https://x-access-token:${env.GITHUB_TOKEN}@github.com/${env.BRAIN_REPO}.git`;
+      // Write a credential helper so git commands in bash can authenticate.
+      const credHelper = state.path(".git-credential-helper");
+      const { writeFileSync, chmodSync } = await import("node:fs");
+      writeFileSync(credHelper, `#!/bin/sh\nif [ "$1" = "get" ]; then\n  echo "username=x-access-token"\n  echo "password=${env.GITHUB_TOKEN}"\nfi\n`, { mode: 0o755 });
+      chmodSync(credHelper, 0o755);
+      // Configure git identity and credential helper globally.
+      execSync("git config --global user.name \"Instinct Agent\"", { stdio: "ignore" });
+      execSync("git config --global user.email \"agent@instinct.local\"", { stdio: "ignore" });
+      execSync(`git config --global credential.helper "${credHelper}"`, { stdio: "ignore" });
+      if (!existsSync(gitDir)) {
+        // Clone into /data/brain (must not exist or be empty).
+        const { mkdirSync, readdirSync } = await import("node:fs");
+        if (!existsSync(brainDir)) mkdirSync(brainDir, { recursive: true });
+        const contents = readdirSync(brainDir);
+        if (contents.length === 0 || (contents.length === 1 && contents[0] === ".git")) {
+          execSync(`git clone ${repoUrl} ${brainDir}`, { stdio: "pipe", timeout: 60000 });
+          log(`git: cloned ${env.BRAIN_REPO} into ${brainDir}`);
+        } else {
+          // Directory has files but no .git — init and set remote.
+          execSync("git init", { cwd: brainDir, stdio: "ignore" });
+          execSync(`git remote add origin ${repoUrl}`, { cwd: brainDir, stdio: "ignore" });
+          execSync("git fetch origin", { cwd: brainDir, stdio: "pipe", timeout: 60000 });
+          execSync("git reset --hard origin/HEAD", { cwd: brainDir, stdio: "ignore" });
+          log(`git: initialized repo in ${brainDir} from ${env.BRAIN_REPO}`);
+        }
+      } else {
+        // Already a git repo — pull latest.
+        try {
+          execSync("git pull --ff-only", { cwd: brainDir, stdio: "pipe", timeout: 60000 });
+          log(`git: pulled latest for ${env.BRAIN_REPO}`);
+        } catch (pullErr) {
+          log(`git: pull failed (may have local changes): ${pullErr instanceof Error ? pullErr.message : String(pullErr)}`);
+        }
+      }
+    } catch (err) {
+      log(`git: setup failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else if (env.BRAIN_REPO) {
+    log(`git: BRAIN_REPO set but no GITHUB_TOKEN; skipping git setup (read-only mirror via gateway push)`);
+  }
 
   const audit = new AuditLog(state);
   const policy = new PolicyEngine(loadPolicy(state), {
@@ -405,14 +455,20 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   // under /data/brain (written by the gateway) and a locally authored store
   // under /data/Company-brain (SOPs, research). They are intentionally separate.
   const brainRoots: string[] = [];
-  if (existsSync(state.path("brain"))) brainRoots.push("imported GitHub mirror: /data/brain");
+  if (existsSync(state.path("brain"))) brainRoots.push("imported GitHub mirror: /data/brain" + (env.BRAIN_REPO ? ` (git repo: ${env.BRAIN_REPO}, push changes with git add/commit/push)` : ""));
   if (existsSync(state.path("Company-brain"))) brainRoots.push("locally authored (SOPs, research): /data/Company-brain");
   if (brainRoots.length > 0) {
     promptSections.push(
       "# Company brain roots\n" +
         "Two separate roots, do not mix their write semantics:\n" +
         brainRoots.map((r) => "- " + r).join("\n") +
-        "\nGateway-pushed files under /data/brain are a mirror of an upstream GitHub repo and may be refreshed wholesale; never put authored SOPs there. SOPs you author go under /data/Company-brain/SOPs/... (via generate_dynamic_sop when AgentRun is enabled).",
+        "\nGateway-pushed files under /data/brain are a mirror of an upstream GitHub repo and may be refreshed wholesale; never put authored SOPs there. SOPs you author go under /data/Company-brain/SOPs/... (via generate_dynamic_sop when AgentRun is enabled)." +
+        (env.BRAIN_REPO ? `\n\n# Git version control for company brain\n` +
+          `The company brain at /data/brain is a git clone of ${env.BRAIN_REPO}.\n` +
+          `You have full git capability: clone, pull, add, commit, push.\n` +
+          `Use bash to run git commands (e.g., git status, git add, git commit, git push).\n` +
+          `Git identity is configured. Use git to version-control changes to the company brain.\n` +
+          `To push changes: cd /data/brain && git add . && git commit -m "message" && git push` : ""),
     );
   }
   const staticSections = promptSections.join("\n\n");
