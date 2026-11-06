@@ -286,7 +286,8 @@ export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
     // its capabilities before relaying the message to the agent process.
     onInbound: async (user, event) => {
       if (user.welcomeSent) return;
-      if ((event as Record<string, unknown>).eventType !== "imessage.received") return;
+      const eventType = (event as Record<string, unknown>).event_type ?? (event as Record<string, unknown>).eventType;
+      if (eventType !== "imessage.received") return;
       if (!user.phone || !user.identityApiKey) return;
       await sendWelcomeMessage(user);
       store.save({ ...user, welcomeSent: true });
