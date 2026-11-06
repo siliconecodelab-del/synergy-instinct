@@ -4,9 +4,9 @@
  * configured. Everything it builds is returned so main.ts, the smoke test and
  * embedders can drive it the same way.
  */
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { AgentRuntime, A2AStore, ApprovalStore, AuditLog, ContactStore, MemoryStore, PolicyEngine, Scheduler, StateDir, ToolRegistry, coreTools, ensurePersona, loadConfig, ownerClaimStatus, readAgentsInstructions, readPersona, syncInstructions, loadPolicy, resolveDataDir, resolveModel, } from "@open-instinct/core";
 import { CALL_ORIGINATIONS, InkboxA2A, InkboxChannel, InkboxInboundHydrator, InkboxProvisioner, handleCallEnded, messagingTools, sendFileTool, voiceInstructions } from "@open-instinct/inkbox";
@@ -376,10 +376,87 @@ export async function boot(env, opts = {}) {
         brainRoots.push("imported GitHub mirror: /data/brain" + (env.BRAIN_REPO ? ` (git repo: ${env.BRAIN_REPO}, push changes with git add/commit/push)` : ""));
     if (existsSync(state.path("Company-brain")))
         brainRoots.push("locally authored (SOPs, research): /data/Company-brain");
+    // Scan both brain directories for file structure and key content.
+    const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "vendor", ".venv", "venv", "__pycache__", "coverage"]);
+    const KEY_FILES = ["README.md", "index.md", "ICP.md", "overview.md", "company_overview.md"];
+    function scanBrainDir(dirPath) {
+        const files = [];
+        try {
+            const walk = (dir, prefix) => {
+                let entries;
+                try {
+                    entries = readdirSync(dir, { withFileTypes: true });
+                }
+                catch {
+                    return;
+                }
+                for (const entry of entries) {
+                    const fullPath = join(dir, entry.name);
+                    const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+                    if (entry.isDirectory()) {
+                        if (!SKIP_DIRS.has(entry.name)) {
+                            walk(fullPath, relPath);
+                        }
+                    }
+                    else if (entry.isFile()) {
+                        files.push(relPath);
+                    }
+                }
+            };
+            walk(dirPath, "");
+        }
+        catch {
+            /* directory doesn't exist or isn't readable */
+        }
+        return files;
+    }
+    const brainIndex = [];
+    const brainKeyContent = [];
+    if (existsSync(state.path("brain"))) {
+        const brainFiles = scanBrainDir(state.path("brain"));
+        brainIndex.push(`# /data/brain (imported GitHub mirror${env.BRAIN_REPO ? `, git repo: ${env.BRAIN_REPO}` : ""})`);
+        brainIndex.push(`Files (${brainFiles.length}):`);
+        brainIndex.push(...brainFiles.slice(0, 100).map((f) => `- ${f}`));
+        if (brainFiles.length > 100)
+            brainIndex.push(`... and ${brainFiles.length - 100} more files`);
+        for (const keyFile of KEY_FILES) {
+            const keyPath = join(state.path("brain"), keyFile);
+            if (existsSync(keyPath)) {
+                try {
+                    const content = readFileSync(keyPath, "utf8").slice(0, 3000);
+                    brainKeyContent.push(`## /data/brain/${keyFile}\n${content}`);
+                }
+                catch {
+                    /* skip unreadable */
+                }
+            }
+        }
+    }
+    if (existsSync(state.path("Company-brain"))) {
+        const companyFiles = scanBrainDir(state.path("Company-brain"));
+        brainIndex.push(`# /data/Company-brain (locally authored SOPs, research)`);
+        brainIndex.push(`Files (${companyFiles.length}):`);
+        brainIndex.push(...companyFiles.slice(0, 100).map((f) => `- ${f}`));
+        if (companyFiles.length > 100)
+            brainIndex.push(`... and ${companyFiles.length - 100} more files`);
+        for (const keyFile of KEY_FILES) {
+            const keyPath = join(state.path("Company-brain"), keyFile);
+            if (existsSync(keyPath)) {
+                try {
+                    const content = readFileSync(keyPath, "utf8").slice(0, 3000);
+                    brainKeyContent.push(`## /data/Company-brain/${keyFile}\n${content}`);
+                }
+                catch {
+                    /* skip unreadable */
+                }
+            }
+        }
+    }
     if (brainRoots.length > 0) {
         promptSections.push("# Company brain roots\n" +
             "Two separate roots, do not mix their write semantics:\n" +
             brainRoots.map((r) => "- " + r).join("\n") +
+            (brainIndex.length > 0 ? "\n\n" + brainIndex.join("\n") : "") +
             "\nGateway-pushed files under /data/brain are a mirror of an upstream GitHub repo and may be refreshed wholesale; never put authored SOPs there. SOPs you author go under /data/Company-brain/SOPs/... (via generate_dynamic_sop when AgentRun is enabled)." +
             (env.BRAIN_REPO ? `\n\n# Git version control for company brain\n` +
                 `The company brain at /data/brain is a git clone of ${env.BRAIN_REPO}.\n` +
@@ -387,6 +464,21 @@ export async function boot(env, opts = {}) {
                 `Use bash to run git commands (e.g., git status, git add, git commit, git push).\n` +
                 `Git identity is configured. Use git to version-control changes to the company brain.\n` +
                 `To push changes: cd /data/brain && git add . && git commit -m "message" && git push` : ""));
+    }
+    if (brainKeyContent.length > 0) {
+        promptSections.push("# Key company brain documents (auto-loaded on boot)\n" +
+            brainKeyContent.join("\n\n---\n\n") +
+            "\nThese key documents were read on boot and provide immediate context about the company. Use them when answering questions about company structure, ICP, outbound campaigns, etc.");
+    }
+    if (brainRoots.length > 0) {
+        promptSections.push("# Reading company brain files\n" +
+            "The file tools (read/ls/grep/write/edit) only work inside /data/workspace. Company brain files live in /data/brain and /data/Company-brain, which are OUTSIDE the workspace. " +
+            "To read brain files, use bash:\n" +
+            "  cd /data/brain && cat <filename>\n" +
+            "  cd /data/Company-brain && cat <filename>\n" +
+            "  cd /data/brain && find . -name '*.md' | head -50\n" +
+            "  cd /data/brain && git status\n" +
+            "Always check the brain before answering questions about company context — don't guess.");
     }
     const staticSections = promptSections.join("\n\n");
     // Built per conversation, so each principal's index lists only the skills they may load.
