@@ -1,4 +1,5 @@
 import { InkboxProvisioner } from "@open-instinct/inkbox";
+import { Inkbox } from "@inkbox/sdk";
 import { ensureComputersKey } from "./computersKey.js";
 import { ComposioPlatform } from "./composio.js";
 import { consoleLogger } from "./logger.js";
@@ -7,6 +8,21 @@ import { type GatewayServer, createGateway } from "./server.js";
 import { UserStore } from "./store.js";
 
 export const DEFAULT_AGENT_IMAGE = "ghcr.io/siliconecodelab-del/synergy-instinct-agent:latest";
+
+/** Send a proactive welcome iMessage on the first inbound message from a user. */
+async function sendWelcomeMessage(user: { id: string; name: string; phone: string; handle: string; identityApiKey: string }): Promise<void> {
+  try {
+    const inkbox = new Inkbox({ apiKey: user.identityApiKey });
+    const identity = await inkbox.getIdentity(user.handle);
+    if (!identity?.imessageEnabled) return;
+    await identity.sendIMessage({
+      to: user.phone,
+      text: `Hi ${user.name}! I'm your Instinct agent (@${user.handle}). I'm here and ready to help — I can assist with outbound campaigns, company brain research, SOP generation, and more. What would you like to work on first?`,
+    });
+  } catch (err) {
+    console.warn("[welcome] failed to send", { userId: user.id, error: err instanceof Error ? err.message : String(err) });
+  }
+}
 
 export interface GatewayEnv {
   port: number;
@@ -266,6 +282,16 @@ export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
     supabaseUrl: cfg.supabaseUrl,
     supabaseServiceRoleKey: cfg.supabaseServiceRoleKey,
     logger: log,
+    // Proactive welcome: on the first inbound iMessage, introduce the agent and
+    // its capabilities before relaying the message to the agent process.
+    onInbound: async (user, event) => {
+      if (user.welcomeSent) return;
+      if ((event as Record<string, unknown>).eventType !== "imessage.received") return;
+      if (!user.phone || !user.identityApiKey) return;
+      await sendWelcomeMessage(user);
+      store.save({ ...user, welcomeSent: true });
+      log.info("welcome.sent", { userId: user.id, handle: user.handle, to: user.phone });
+    },
     // The triage endpoint called with an identity-scoped key answers for that identity, so its QR fits the user.
     routerInfoFor: (user) => new InkboxProvisioner({ adminApiKey: user.identityApiKey, baseUrl: cfg.inkboxBaseUrl }).routerInfo(),
   });

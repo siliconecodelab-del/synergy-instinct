@@ -22,6 +22,8 @@ export interface UserRecord {
   brainRepo?: string;
   /** GitHub token for a private brain repo. Kept like other secrets: never logged, never echoed back. */
   brainToken?: string;
+  /** Whether the proactive welcome iMessage has been sent on the first inbound message. */
+  welcomeSent?: boolean;
   /** Composio connected account id for the executor toolkit (session user = handle). Reused while active. */
   composioAccountId?: string;
   /** BYOK Postiz public-API key saved on the connect page. Kept like other secrets: never logged, never echoed back. */

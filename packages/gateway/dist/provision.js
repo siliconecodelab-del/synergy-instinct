@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { Inkbox } from "@inkbox/sdk";
 import { pushBrain } from "./brain.js";
 import { EXECUTOR_TOOLKIT_NAME, OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG } from "./composio.js";
 import { silentLogger } from "./logger.js";
@@ -584,28 +583,6 @@ export async function provisionUser(input, deps) {
         }
         user = store.save({ ...user, status: "ready", error: undefined });
         log.info("provision.ready", { userId: user.id, handle: user.handle });
-        // Proactive welcome iMessage: introduce the agent and its capabilities on first provision.
-        void (async () => {
-            try {
-                if (!user.phone || !user.identityApiKey)
-                    return;
-                const inkbox = new Inkbox({ apiKey: user.identityApiKey });
-                const identity = await inkbox.getIdentity(user.handle);
-                if (!identity.imessageEnabled)
-                    return;
-                await identity.sendIMessage({
-                    to: user.phone,
-                    text: `Hi ${user.name}! I'm your Instinct agent (@${user.handle}). I'm here and ready to help. I can assist with outbound campaigns, company brain research, SOP generation, and more. What would you like to work on first?`,
-                });
-                log.info("provision.welcome_sent", { userId: user.id, handle: user.handle, to: user.phone });
-            }
-            catch (err) {
-                log.warn("provision.welcome_failed", {
-                    userId: user.id,
-                    error: err instanceof Error ? err.message : String(err),
-                });
-            }
-        })();
         return user;
     }
     catch (err) {
