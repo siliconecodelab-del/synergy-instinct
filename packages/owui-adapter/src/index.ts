@@ -7,6 +7,12 @@
  *   GET  /health                — Health check
  *
  * Internally calls Maritime's /chat endpoint for the configured agent.
+ *
+ * Auth model:
+ *   - If Open WebUI forwards a user ID (X-User-Id / x-user-id / x-webui-user-id),
+ *     the adapter verifies the user owns the requested instinct agent via Supabase.
+ *   - If no user ID is forwarded, falls back to the shared ADAPTER_TOKEN for
+ *     backward compatibility.
  */
 
 import http from "node:http";
@@ -66,7 +72,31 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-function validateAuth(req: http.IncomingMessage): boolean {
+/**
+ * Extract the Open WebUI user ID from forwarded headers.
+ * Open WebUI forwards user info via headers such as X-User-Id,
+ * x-webui-user-id, or x-user-id when ENABLE_FORWARD_USER_INFO_HEADERS is set.
+ */
+function getForwardedUserId(req: http.IncomingMessage): string | undefined {
+  const headers = req.headers;
+  const candidateKeys = [
+    "x-user-id",
+    "x-webui-user-id",
+    "x-open-webui-user-id",
+    "x-forwarded-user",
+  ];
+  for (const key of candidateKeys) {
+    const val = headers[key];
+    if (typeof val === "string" && val.trim()) return val.trim();
+    if (Array.isArray(val) && val[0]?.trim()) return val[0].trim();
+  }
+  return undefined;
+}
+
+/**
+ * Validate the shared adapter token (backward-compat path).
+ */
+function validateAdapterToken(req: http.IncomingMessage): boolean {
   if (!ADAPTER_TOKEN) return true; // No token configured = open
   const auth = req.headers.authorization;
   if (typeof auth === "string") {
@@ -78,42 +108,69 @@ function validateAuth(req: http.IncomingMessage): boolean {
   return false;
 }
 
-async function fetchSupabase<T>(path: string): Promise<T | null> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+/**
+ * Verify that the given user owns the requested instinct agent by querying
+ * Supabase instinct_agent_adapters. Returns true if authorized, false otherwise.
+ */
+async function verifyUserOwnsAgent(
+  userId: string,
+  instinctUserId: string,
+): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    // No Supabase configured — fall back to shared token auth
+    return true;
+  }
   try {
-    const url = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/${path}`;
+    const url = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters`;
     const res = await fetch(url, {
+      method: "GET",
       headers: {
         apikey: SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         Accept: "application/json",
       },
     });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
+    if (!res.ok) return false;
+    const rows = (await res.json()) as Array<{ instinct_user_id: string; user_id: string }>;
+    return rows.some(
+      (r) => r.instinct_user_id === instinctUserId && r.user_id === userId,
+    );
   } catch {
-    return null;
+    return false;
   }
 }
 
-interface InstinctAdapterRow {
-  id: string;
-  user_id: string;
-  instinct_user_id: string;
-  fly_app: string;
-  adapter_url: string;
-  adapter_token: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-  last_health_check: string | null;
+/**
+ * Authorize the request. Returns { authorized, reason }.
+ * Priority:
+ *   1. If a forwarded user ID is present, verify ownership via Supabase.
+ *   2. Otherwise, fall back to shared ADAPTER_TOKEN.
+ */
+async function authorizeRequest(
+  req: http.IncomingMessage,
+  instinctUserId: string,
+): Promise<{ authorized: boolean; reason: string }> {
+  const forwardedUserId = getForwardedUserId(req);
+
+  if (forwardedUserId) {
+    const owns = await verifyUserOwnsAgent(forwardedUserId, instinctUserId);
+    if (owns) {
+      return { authorized: true, reason: "user_owns_agent" };
+    }
+    return {
+      authorized: false,
+      reason: `user ${forwardedUserId} does not own agent ${instinctUserId}`,
+    };
+  }
+
+  // Fall back to shared token
+  if (validateAdapterToken(req)) {
+    return { authorized: true, reason: "adapter_token" };
+  }
+  return { authorized: false, reason: "invalid_token" };
 }
 
 async function handleChatCompletions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  if (!validateAuth(req)) {
-    return sendJson(res, 401, { error: { message: "Invalid or missing adapter token", type: "auth_error" } });
-  }
-
   const raw = await readBody(req);
   let body: any;
   try {
@@ -135,6 +192,14 @@ async function handleChatCompletions(req: http.IncomingMessage, res: http.Server
   const externalId = extractConversationId(model, openaiReq.user);
   if (!externalId || externalId === "default") {
     return sendJson(res, 400, { error: { message: "Model must be instinct-agent-{userId}", type: "invalid_request" } });
+  }
+
+  // ── Per-user authorization ──────────────────────────────────────────
+  const auth = await authorizeRequest(req, externalId);
+  if (!auth.authorized) {
+    return sendJson(res, 403, {
+      error: { message: `Access denied: ${auth.reason}`, type: "auth_error" },
+    });
   }
 
   const maritimeClient = getMaritimeClient(externalId);
@@ -181,7 +246,9 @@ async function handleChatCompletions(req: http.IncomingMessage, res: http.Server
 }
 
 async function handleModels(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  if (!validateAuth(req)) {
+  // Models list is read-only; allow with shared token for discovery.
+  // Per-model access is enforced at chat time.
+  if (!validateAdapterToken(req)) {
     return sendJson(res, 401, { error: { message: "Invalid or missing adapter token", type: "auth_error" } });
   }
 
@@ -194,18 +261,29 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
   }> = [];
 
   // Query Supabase for all ready adapter rows
-  const rows = await fetchSupabase<InstinctAdapterRow[]>(
-    "instinct_agent_adapters?select=instinct_user_id&status=eq.ready"
-  );
-
-  if (rows && Array.isArray(rows)) {
-    for (const row of rows) {
-      data.push({
-        id: `instinct-agent-${row.instinct_user_id}`,
-        object: "model",
-        created: now,
-        owned_by: "instinct-agent",
+  if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+      const url = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id&status=eq.ready`;
+      const res2 = await fetch(url, {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          Accept: "application/json",
+        },
       });
+      if (res2.ok) {
+        const rows = (await res2.json()) as Array<{ instinct_user_id: string }>;
+        for (const row of rows) {
+          data.push({
+            id: `instinct-agent-${row.instinct_user_id}`,
+            object: "model",
+            created: now,
+            owned_by: "instinct-agent",
+          });
+        }
+      }
+    } catch {
+      // Supabase query failed — return empty list
     }
   }
 
@@ -224,9 +302,15 @@ const server = http.createServer(async (req, res) => {
   try {
     if (method === "GET" && path === "/health") {
       await handleHealth(req, res);
-    } else if (method === "POST" && path === "/v1/chat/completions" || method === "POST" && path === "/chat/completions") {
+    } else if (
+      method === "POST" &&
+      (path === "/v1/chat/completions" || path === "/chat/completions")
+    ) {
       await handleChatCompletions(req, res);
-    } else if (method === "GET" && path === "/v1/models" || method === "GET" && path === "/models") {
+    } else if (
+      method === "GET" &&
+      (path === "/v1/models" || path === "/models")
+    ) {
       await handleModels(req, res);
     } else {
       sendJson(res, 404, { error: { message: "Not found", type: "not_found" } });

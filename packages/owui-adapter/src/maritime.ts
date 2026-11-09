@@ -10,6 +10,71 @@ export interface MaritimeConfig {
   chatToken?: string;    // INSTINCT_CHAT_TOKEN for agent auth
 }
 
+interface RetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  retryableStatuses?: number[];
+}
+
+const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 8000,
+  retryableStatuses: [408, 429, 500, 502, 503, 504],
+};
+
+/**
+ * Sleep for the given number of milliseconds.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute a fetch with exponential backoff retry on retryable errors.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retries: Required<RetryOptions>,
+): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= retries.maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+
+      // Retryable status codes -> backoff and retry
+      if (!res.ok && retries.retryableStatuses.includes(res.status)) {
+        lastError = new Error(`HTTP ${res.status}`);
+        const delay = Math.min(
+          retries.baseDelayMs * Math.pow(2, attempt),
+          retries.maxDelayMs,
+        );
+        await sleep(delay);
+        continue;
+      }
+
+      return res;
+    } catch (err) {
+      // Network errors (DNS, connection refused, timeout) -> retry
+      lastError = err as Error;
+      if (attempt < retries.maxRetries) {
+        const delay = Math.min(
+          retries.baseDelayMs * Math.pow(2, attempt),
+          retries.maxDelayMs,
+        );
+        await sleep(delay);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError ?? new Error("Request failed after retries");
+}
+
 export class MaritimeClient {
   private config: MaritimeConfig;
   private resolvedAgentId: string | null = null;
@@ -30,9 +95,14 @@ export class MaritimeClient {
     }
 
     const url = `${this.config.baseUrl.replace(/\/+$/, "")}/api/agents?externalId=${encodeURIComponent(this.config.externalId)}`;
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${this.config.apiKey}` },
-    });
+    const res = await fetchWithRetry(
+      url,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.config.apiKey}` },
+      },
+      DEFAULT_RETRY_OPTIONS,
+    );
 
     if (!res.ok) {
       throw new Error(`Failed to resolve agent: ${res.status}`);
@@ -74,11 +144,15 @@ export class MaritimeClient {
       conversation_id: conversationId,
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
+    const res = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      },
+      DEFAULT_RETRY_OPTIONS,
+    );
 
     if (!res.ok) {
       const text = await res.text();
