@@ -42,7 +42,8 @@ RUN pnpm --filter @open-instinct/core build \
 FROM base AS runtime
 ENV NODE_ENV=production \
     PORT=8080 \
-    INSTINCT_SKILLS_DIR=/app/skills
+    INSTINCT_SKILLS_DIR=/app/skills \
+    INSTINCT_AGENTRUN=1
 COPY --from=build /app /app
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
