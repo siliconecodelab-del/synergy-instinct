@@ -33,13 +33,16 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY packages ./packages
+# Playbooks (sop-architect, pipeline-guide, deep-research, ...) are loaded at boot from /app/skills.
+COPY skills ./skills
 RUN pnpm --filter @open-instinct/core build \
   && pnpm -r --filter './packages/*' run build \
   && (pnpm prune --prod || echo "prune skipped; keeping dev deps")
 
 FROM base AS runtime
 ENV NODE_ENV=production \
-    PORT=8080
+    PORT=8080 \
+    INSTINCT_SKILLS_DIR=/app/skills
 COPY --from=build /app /app
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1

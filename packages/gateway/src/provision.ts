@@ -204,6 +204,12 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
   if (!env.some((e) => e.key === "INSTINCT_AGENTRUN")) {
     env.push({ key: "INSTINCT_AGENTRUN", value: "1", isSecret: false });
   }
+  // Match the desktop flag the create body uses: a hosted computer when the VM
+  // has one (the historic default), none otherwise.
+  if (!env.some((e) => e.key === "INSTINCT_COMPUTER")) {
+    const desktop = deps.template ? deps.template.hardware.desktop : deps.maritime.desktop ?? true;
+    env.push({ key: "INSTINCT_COMPUTER", value: desktop ? "auto" : "none", isSecret: false });
+  }
   if (deps.template) applyTemplateEnv(env, deps.template);
   // Gateway-managed toolkits need boot state the agent cannot create itself:
   // a connected account (executor, postiz) or a finished per-person OAuth

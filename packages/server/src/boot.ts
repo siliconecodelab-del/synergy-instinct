@@ -645,6 +645,25 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     // Code-level pipeline store (no legacy migration; legacy records removed).
     const pipelineStore = new PipelineStore(state);
 
+    // Auto-register the daily proactive SOP nudge schedule on first boot so nudges
+    // do not depend on a manual enable_schedule call. Idempotent: an existing
+    // entry with this name is left untouched.
+    try {
+      if (!scheduler.list().some((e) => e.name === "sop-proactive-nudge-daily")) {
+        scheduler.create({
+          name: "sop-proactive-nudge-daily",
+          prompt:
+            "Run sop_proactive_nudge with action='scan'. If a nudge is allowed and returned, send the compact role-aware nudge message to the owner.",
+          enabled: true,
+          cron: "0 9 * * *",
+          tz: "UTC",
+        });
+        log("agentrun: auto-registered daily proactive SOP nudge schedule");
+      }
+    } catch (err) {
+      log(`agentrun: failed to auto-register nudge schedule: ${(err as Error).message}`);
+    }
+
     // Inject the owner's pipeline mode preference into the AgentRun prompt so
     // the agent knows whether to auto-advance or confirm per stage.
     const pipelinePrefs = readPipelinePrefs(state);
@@ -677,7 +696,10 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "Every SOP defines an explicit Role Map ('Where You Fit vs. Where the Agent Fits') based on its " +
       "`execution_classification` (`Manual` | `Hybrid` | `Fully_Automated`). Always surface this Role Map " +
       "to the owner when creating or nudging about an SOP while keeping internal engine stages (ICM/tracer/DSL) " +
-      "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.",
+      "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.\n\n" +
+      "Nudges are opt-in by schedule: a daily proactive SOP nudge is auto-registered on first boot when " +
+      "AgentRun is enabled. After creating the first SOP, if that daily schedule is not already active, " +
+      "offer to enable it with `sop_proactive_nudge` (action='enable_schedule') so nudges run automatically.",
     );
   }
 
