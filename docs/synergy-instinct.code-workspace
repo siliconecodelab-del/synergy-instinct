@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../founder-synergy-agent-platform"
+		},
+		{
+			"path": "../../hermes-agents"
+		},
+		{
+			"path": "../../foundersynergy-agent-company-brain"
+		}
+	],
+	"settings": {}
+}

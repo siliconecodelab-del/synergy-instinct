@@ -13,7 +13,7 @@
  */
 import http from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { decodeEvent, systemTaskOf } from "@open-instinct/core";
+import { decodeEvent, systemTaskOf, AuditLog, localDate, type AuditKind } from "@open-instinct/core";
 import type { AgentRuntime, HandleResult, InboundMessage, InstinctConfig, OutboundMessage, ScheduleEntry, Scheduler, StateDir } from "@open-instinct/core";
 import { DurableInbox, parseCallEnded, parseInkboxEvent, verifyInkboxSignature } from "@open-instinct/inkbox";
 import type { CallEndedEvent } from "@open-instinct/inkbox";
@@ -534,6 +534,213 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
       const sp = new Scratchpad(app.state!);
       const keys = sp.list();
       return sendJson(res, 200, { keys, count: keys.length });
+    }
+
+    // Observability: unified audit view — traces + audit.jsonl for a given day.
+    if (app.agentrun && method === "GET" && path === "/agentrun/audit") {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const tz = app.config.owner.timezone ?? "UTC";
+      const dateParam = url.searchParams.get("date");
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+      const targetDate = dateParam ?? localDate(new Date(), tz);
+
+      const recorder = new TurnTraceRecorder(app.state!);
+      const auditLog = new AuditLog(app.state!);
+
+      // Collect turn-level trace entries for the target date.
+      interface TraceItem {
+        kind: "turn" | "tool_call" | "decision";
+        at: string;
+        turnId: string;
+        conversationKey: string;
+        tool?: string;
+        argsHash?: string;
+        outcome?: string;
+        decisionKind?: string;
+        decisionOutcome?: string;
+        decisionReason?: string;
+        spendUsd?: number;
+        status?: string;
+        reply?: string;
+        detail?: Record<string, unknown>;
+      }
+
+      const traceItems: TraceItem[] = [];
+
+      const turnIds = recorder.list();
+      for (const id of turnIds) {
+        const trace = recorder.read(id);
+        if (!trace) continue;
+        const started = new Date(trace.startedAt);
+        if (Number.isNaN(started.getTime()) || localDate(started, tz) !== targetDate) continue;
+
+        traceItems.push({
+          kind: "turn",
+          at: trace.startedAt,
+          turnId: trace.turnId,
+          conversationKey: trace.conversationKey,
+          status: trace.status,
+          reply: trace.reply,
+          spendUsd: trace.spendUsd,
+        });
+
+        for (const c of trace.toolCalls) {
+          traceItems.push({
+            kind: "tool_call",
+            at: c.durationMs !== undefined
+              ? new Date(new Date(trace.startedAt).getTime() + c.durationMs).toISOString()
+              : trace.startedAt,
+            turnId: trace.turnId,
+            conversationKey: trace.conversationKey,
+            tool: c.tool,
+            argsHash: c.argsHash,
+            outcome: c.outcome,
+            detail: c.error ? { error: c.error } : undefined,
+          });
+        }
+
+        for (const d of trace.decisions) {
+          traceItems.push({
+            kind: "decision",
+            at: trace.startedAt,
+            turnId: trace.turnId,
+            conversationKey: trace.conversationKey,
+            decisionKind: d.kind,
+            decisionOutcome: d.outcome,
+            decisionReason: d.reason,
+            detail: d.tool ? { tool: d.tool } : undefined,
+          });
+        }
+      }
+
+      // Collect audit entries for the target date.
+      const auditItems = auditLog.read({
+        since: `${targetDate}T00:00:00.000Z`,
+        limit,
+      }).filter((e) => localDate(new Date(e.at), tz) === targetDate);
+
+      // Merge traces + audit entries into one chronological timeline.
+      type AuditItem = {
+        kind: "audit";
+        at: string;
+        turnId: undefined;
+        conversationKey: string;
+        auditKind: AuditKind;
+        detail: Record<string, unknown>;
+      };
+
+      const merged: (TraceItem | AuditItem)[] = [
+        ...traceItems.sort((a, b) => a.at.localeCompare(b.at)),
+        ...auditItems.map((e) => ({
+          kind: "audit" as const,
+          at: e.at,
+          turnId: undefined,
+          conversationKey: e.conversationKey ?? "",
+          auditKind: e.kind,
+          detail: e.detail,
+        })),
+      ].sort((a, b) => a.at.localeCompare(b.at));
+
+      if (limit !== undefined && Number.isFinite(limit) && limit >= 0) {
+        merged.splice(limit);
+      }
+
+      return sendJson(res, 200, {
+        date: targetDate,
+        tz,
+        count: merged.length,
+        entries: merged,
+      });
+    }
+
+    // Observability: trace replay — reconstruct a turn from its trace file.
+    if (app.agentrun && method === "GET" && path === "/agentrun/traces/replay") {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const turnId = url.searchParams.get("turnId");
+      if (!turnId) {
+        return sendJson(res, 400, { error: "Pass ?turnId=<turnId> to replay a trace." });
+      }
+      const recorder = new TurnTraceRecorder(app.state!);
+      const trace = recorder.read(turnId);
+      if (!trace) return sendJson(res, 404, { error: `trace not found: ${turnId}` });
+
+      interface ReplayStep {
+        step: number;
+        at: string;
+        type: "input" | "tool_call" | "decision" | "outcome";
+        tool?: string;
+        argsHash?: string;
+        outcome?: string;
+        error?: string;
+        decisionKind?: string;
+        decisionOutcome?: string;
+        decisionReason?: string;
+        spendUsd?: number;
+        status?: string;
+        reply?: string;
+        text?: string;
+        channel?: string;
+        from?: string;
+      }
+
+      const steps: ReplayStep[] = [];
+      let step = 0;
+
+      steps.push({
+        step: step++,
+        at: trace.startedAt,
+        type: "input",
+        text: trace.input.text,
+        channel: trace.input.channel,
+        from: trace.input.from,
+      });
+
+      for (const c of trace.toolCalls) {
+        steps.push({
+          step: step++,
+          at: c.durationMs !== undefined
+            ? new Date(new Date(trace.startedAt).getTime() + c.durationMs).toISOString()
+            : trace.startedAt,
+          type: "tool_call",
+          tool: c.tool,
+          argsHash: c.argsHash,
+          outcome: c.outcome,
+          error: c.error,
+        });
+      }
+
+      for (const d of trace.decisions) {
+        steps.push({
+          step: step++,
+          at: trace.startedAt,
+          type: "decision",
+          decisionKind: d.kind,
+          decisionOutcome: d.outcome,
+          decisionReason: d.reason,
+          tool: d.tool,
+        });
+      }
+
+      steps.push({
+        step: step++,
+        at: trace.finishedAt ?? trace.startedAt,
+        type: "outcome",
+        status: trace.status,
+        reply: trace.reply,
+        spendUsd: trace.spendUsd,
+      });
+
+      return sendJson(res, 200, {
+        turnId: trace.turnId,
+        startedAt: trace.startedAt,
+        finishedAt: trace.finishedAt,
+        durationMs: trace.durationMs,
+        principal: trace.principal,
+        conversationKey: trace.conversationKey,
+        steps,
+        count: steps.length,
+      });
     }
 
     // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).
