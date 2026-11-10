@@ -521,6 +521,95 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
       return sendJson(res, 200, { traces, count: traces.length });
     }
 
+    // Observability: trace replay — reconstruct a turn from its trace file.
+    if (app.agentrun && method === "GET" && path === "/agentrun/traces/replay") {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const turnId = url.searchParams.get("turnId");
+      if (!turnId) {
+        return sendJson(res, 400, { error: "Pass ?turnId=<turnId> to replay a trace." });
+      }
+      const recorder = new TurnTraceRecorder(app.state!);
+      const trace = recorder.read(turnId);
+      if (!trace) return sendJson(res, 404, { error: `trace not found: ${turnId}` });
+
+      interface ReplayStep {
+        step: number;
+        at: string;
+        type: "input" | "tool_call" | "decision" | "outcome";
+        tool?: string;
+        argsHash?: string;
+        outcome?: string;
+        error?: string;
+        decisionKind?: string;
+        decisionOutcome?: string;
+        decisionReason?: string;
+        spendUsd?: number;
+        status?: string;
+        reply?: string;
+        text?: string;
+        channel?: string;
+        from?: string;
+      }
+
+      const steps: ReplayStep[] = [];
+      let step = 0;
+
+      steps.push({
+        step: step++,
+        at: trace.startedAt,
+        type: "input",
+        text: trace.input.text,
+        channel: trace.input.channel,
+        from: trace.input.from,
+      });
+
+      for (const c of trace.toolCalls) {
+        steps.push({
+          step: step++,
+          at: c.durationMs !== undefined
+            ? new Date(new Date(trace.startedAt).getTime() + c.durationMs).toISOString()
+            : trace.startedAt,
+          type: "tool_call",
+          tool: c.tool,
+          argsHash: c.argsHash,
+          outcome: c.outcome,
+          error: c.error,
+        });
+      }
+
+      for (const d of trace.decisions) {
+        steps.push({
+          step: step++,
+          at: trace.startedAt,
+          type: "decision",
+          decisionKind: d.kind,
+          decisionOutcome: d.outcome,
+          decisionReason: d.reason,
+          tool: d.tool,
+        });
+      }
+
+      steps.push({
+        step: step++,
+        at: trace.finishedAt ?? trace.startedAt,
+        type: "outcome",
+        status: trace.status,
+        reply: trace.reply,
+        spendUsd: trace.spendUsd,
+      });
+
+      return sendJson(res, 200, {
+        turnId: trace.turnId,
+        startedAt: trace.startedAt,
+        finishedAt: trace.finishedAt,
+        durationMs: trace.durationMs,
+        principal: trace.principal,
+        conversationKey: trace.conversationKey,
+        steps,
+        count: steps.length,
+      });
+    }
+
     if (app.agentrun && method === "GET" && path.startsWith("/agentrun/traces/")) {
       const turnId = path.slice("/agentrun/traces/".length);
       const recorder = new TurnTraceRecorder(app.state!);
@@ -651,95 +740,6 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
         tz,
         count: merged.length,
         entries: merged,
-      });
-    }
-
-    // Observability: trace replay — reconstruct a turn from its trace file.
-    if (app.agentrun && method === "GET" && path === "/agentrun/traces/replay") {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      const turnId = url.searchParams.get("turnId");
-      if (!turnId) {
-        return sendJson(res, 400, { error: "Pass ?turnId=<turnId> to replay a trace." });
-      }
-      const recorder = new TurnTraceRecorder(app.state!);
-      const trace = recorder.read(turnId);
-      if (!trace) return sendJson(res, 404, { error: `trace not found: ${turnId}` });
-
-      interface ReplayStep {
-        step: number;
-        at: string;
-        type: "input" | "tool_call" | "decision" | "outcome";
-        tool?: string;
-        argsHash?: string;
-        outcome?: string;
-        error?: string;
-        decisionKind?: string;
-        decisionOutcome?: string;
-        decisionReason?: string;
-        spendUsd?: number;
-        status?: string;
-        reply?: string;
-        text?: string;
-        channel?: string;
-        from?: string;
-      }
-
-      const steps: ReplayStep[] = [];
-      let step = 0;
-
-      steps.push({
-        step: step++,
-        at: trace.startedAt,
-        type: "input",
-        text: trace.input.text,
-        channel: trace.input.channel,
-        from: trace.input.from,
-      });
-
-      for (const c of trace.toolCalls) {
-        steps.push({
-          step: step++,
-          at: c.durationMs !== undefined
-            ? new Date(new Date(trace.startedAt).getTime() + c.durationMs).toISOString()
-            : trace.startedAt,
-          type: "tool_call",
-          tool: c.tool,
-          argsHash: c.argsHash,
-          outcome: c.outcome,
-          error: c.error,
-        });
-      }
-
-      for (const d of trace.decisions) {
-        steps.push({
-          step: step++,
-          at: trace.startedAt,
-          type: "decision",
-          decisionKind: d.kind,
-          decisionOutcome: d.outcome,
-          decisionReason: d.reason,
-          tool: d.tool,
-        });
-      }
-
-      steps.push({
-        step: step++,
-        at: trace.finishedAt ?? trace.startedAt,
-        type: "outcome",
-        status: trace.status,
-        reply: trace.reply,
-        spendUsd: trace.spendUsd,
-      });
-
-      return sendJson(res, 200, {
-        turnId: trace.turnId,
-        startedAt: trace.startedAt,
-        finishedAt: trace.finishedAt,
-        durationMs: trace.durationMs,
-        principal: trace.principal,
-        conversationKey: trace.conversationKey,
-        steps,
-        count: steps.length,
       });
     }
 

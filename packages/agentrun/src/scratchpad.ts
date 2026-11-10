@@ -104,6 +104,16 @@ export class Scratchpad {
     } catch {
       return [];
     }
-    return entries.filter((e) => e.endsWith(".json")).map((e) => e.slice(0, -5)).sort();
+    const keys: string[] = [];
+    for (const e of entries) {
+      if (!e.endsWith(".json")) continue;
+      try {
+        const entry = JSON.parse(require("node:fs").readFileSync(join(this.dir, e), "utf8")) as { key?: string };
+        if (entry.key) keys.push(entry.key);
+      } catch {
+        // skip unreadable entries
+      }
+    }
+    return keys.sort();
   }
 }

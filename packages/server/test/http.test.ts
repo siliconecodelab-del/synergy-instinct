@@ -8,6 +8,7 @@ import { encodeEvent, StateDir } from "@open-instinct/core";
 import type { HandleResult, InboundMessage, InstinctConfig, OutboundMessage, ScheduleEntry } from "@open-instinct/core";
 import { ACK_TEXT, CHAT_TOKEN_HEADER, LINK_CALLBACK_EVENT, createHttpServer, listenTunnelServer, matchScheduleEntry, type HttpApp } from "../src/http.js";
 import { ChatReplyBuffer } from "../src/console-outbox.js";
+import { Scratchpad, TurnTraceRecorder } from "@open-instinct/agentrun";
 
 const config: InstinctConfig = {
   version: 1,
@@ -677,5 +678,205 @@ describe("call.ended", () => {
     const res = await fetch(`${base}/webhooks/inkbox`, { method: "POST", headers: signed(body), body });
     expect(res.status).toBe(204);
     expect(logs).toContain("call call_1: report failed: owner unreachable");
+  });
+});
+
+describe("AgentRun observability endpoints", () => {
+  let app: Stub & { agentrun?: any };
+  let base: string;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    app = stubApp() as Stub & { agentrun?: any };
+    const recorder: any = {
+      traces: new Map<string, any>(),
+      list(): string[] {
+        return Array.from(this.traces.keys()).reverse();
+      },
+      read(turnId: string) {
+        return this.traces.get(turnId) ?? undefined;
+      },
+      start(input: any, principal: any) {
+        const turnId = `turn-${Math.random().toString(36).slice(2, 10)}`;
+        const trace = {
+          turnId,
+          startedAt: new Date().toISOString(),
+          input,
+          principal,
+          toolCalls: [],
+          decisions: [],
+          status: "acked",
+          conversationKey: input.conversationKey,
+        };
+        this.traces.set(turnId, trace);
+        return {
+          turnId,
+          finish: (updates: any) => {
+            const t = this.traces.get(turnId)!;
+            Object.assign(t, updates, { finishedAt: new Date().toISOString() });
+          },
+        };
+      },
+      appendToolCall(turnId: string, call: any) {
+        const t = this.traces.get(turnId);
+        if (t) t.toolCalls.push(call);
+      },
+      appendDecision(turnId: string, decision: any) {
+        const t = this.traces.get(turnId);
+        if (t) t.decisions.push(decision);
+      },
+    };
+    const scratchpad: any = {
+      keys: new Map<string, any>(),
+      list(): string[] {
+        return Array.from(this.keys.keys());
+      },
+      claim(key: string) {
+        if (this.keys.has(key)) {
+          const entry = this.keys.get(key);
+          return { ok: true, fresh: false, result: entry.result };
+        }
+        this.keys.set(key, { key, createdAt: new Date().toISOString(), result: null });
+        return { ok: true, fresh: true };
+      },
+      record(key: string, result: any) {
+        const entry = this.keys.get(key) ?? { key, createdAt: new Date().toISOString(), result: null };
+        entry.result = result;
+        this.keys.set(key, entry);
+      },
+    };
+
+    app.agentrun = {
+      store: {
+        list: () => [],
+        save: () => undefined,
+        load: () => undefined,
+        remove: () => false,
+      },
+      adapters: {} as any,
+      stateDir: app.state,
+      run: async () => ({ status: "complete", output: {} }),
+      recorder,
+      scratchpad,
+    };
+
+    // Patch TurnTraceRecorder and Scratchpad to use our fakes by monkeypatching the module is complex;
+    // instead we test the HTTP routes directly by checking they exist and delegate.
+    // For a more integration-focused test, we create a real recorder/scratchpad on a temp state.
+    const realRecorder = new TurnTraceRecorder(app.state);
+    const realScratchpad = new Scratchpad(app.state);
+
+    // Override the fake recorder/scratchpad references used by route handlers.
+    // The route handlers create new instances from app.state, so realRecorder/realScratchpad
+    // are what actually get used. We just need app.state to exist (it does).
+    (app as any).__realRecorder = realRecorder;
+    (app as any).__realScratchpad = realScratchpad;
+
+    // Seed some traces via the real recorder.
+    const { turnId: t1, finish: f1 } = realRecorder.start(
+      { conversationKey: "imessage:+1", channel: "imessage", from: "owner", text: "hello", messageId: "m1", receivedAt: "2026-11-10T09:00:00Z" },
+      { id: "owner", tier: "owner", kind: "owner" },
+    );
+    f1({ status: "completed", reply: "hi there", durationMs: 500 });
+    realRecorder.appendToolCall(t1, { tool: "web_search", argsHash: "abc123", outcome: "ok" });
+    realRecorder.appendDecision(t1, { kind: "policy", tool: "web_search", outcome: "allow" });
+
+    const { turnId: t2 } = realRecorder.start(
+      { conversationKey: "imessage:+1", channel: "imessage", from: "owner", text: "second", messageId: "m2", receivedAt: "2026-11-10T09:05:00Z" },
+      { id: "owner", tier: "owner", kind: "owner" },
+    );
+
+    // Seed a scratchpad key.
+    realScratchpad.record("wf:step:1", { result: "cached" });
+
+    const server = createHttpServer(app, { signingKey: SIGNING_KEY, env: {} });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    close = () => new Promise((r) => server.close(() => r()));
+  });
+  afterEach(async () => close());
+
+  it("GET /agentrun/traces lists traces", async () => {
+    const res = await fetch(`${base}/agentrun/traces`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { traces: any[]; count: number };
+    expect(json.count).toBeGreaterThanOrEqual(2);
+    expect(json.traces[0]).toMatchObject({ turnId: expect.any(String) });
+  });
+
+  it("GET /agentrun/traces/:turnId returns a trace", async () => {
+    // Find a turnId first
+    const listRes = await fetch(`${base}/agentrun/traces`);
+    const listJson = (await listRes.json()) as { traces: any[] };
+    // t1 has text "hello" and tool calls; t2 is newest-first with text "second"
+    const trace = listJson.traces.find((t: any) => t.input.text === "hello");
+    const turnId = trace?.turnId ?? listJson.traces[0].turnId;
+
+    const res = await fetch(`${base}/agentrun/traces/${turnId}`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.turnId).toBe(turnId);
+    expect(json.input.text).toBe("hello");
+    expect(json.toolCalls).toHaveLength(1);
+    expect(json.decisions).toHaveLength(1);
+  });
+
+  it("GET /agentrun/traces/:turnId returns 404 for missing trace", async () => {
+    const res = await fetch(`${base}/agentrun/traces/turn-missing`);
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /agentrun/traces/replay?turnId= returns ordered steps", async () => {
+    const listRes = await fetch(`${base}/agentrun/traces`);
+    const listJson = (await listRes.json()) as { traces: any[] };
+    // Find the trace that has tool calls (t1 was seeded with them; t2 is newest-first but empty)
+    const traceWithCalls = listJson.traces.find((t: any) => t.toolCalls && t.toolCalls.length > 0);
+    const turnId = traceWithCalls?.turnId ?? listJson.traces[0].turnId;
+
+    const res = await fetch(`${base}/agentrun/traces/replay?turnId=${turnId}`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.turnId).toBe(turnId);
+    expect(json.steps).toBeInstanceOf(Array);
+    expect(json.steps[0].type).toBe("input");
+    expect(json.steps.some((s: any) => s.type === "tool_call")).toBe(true);
+    expect(json.steps.some((s: any) => s.type === "decision")).toBe(true);
+    expect(json.steps.some((s: any) => s.type === "outcome")).toBe(true);
+    expect(json.count).toBe(json.steps.length);
+  });
+
+  it("GET /agentrun/traces/replay without turnId returns 400", async () => {
+    const res = await fetch(`${base}/agentrun/traces/replay`);
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /agentrun/audit returns merged timeline for today", async () => {
+    const res = await fetch(`${base}/agentrun/audit`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { date: string; tz: string; count: number; entries: any[] };
+    expect(json.count).toBeGreaterThan(0);
+    expect(json.entries[0]).toHaveProperty("at");
+    expect(json.entries[0]).toHaveProperty("kind");
+    // Entries should be sorted chronologically (string comparison works for ISO timestamps)
+    const ats = json.entries.map((e) => e.at);
+    const sorted = [...ats].sort();
+    expect(ats).toEqual(sorted);
+  });
+
+  it("GET /agentrun/audit with limit truncates results", async () => {
+    const res = await fetch(`${base}/agentrun/audit?limit=2`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { count: number; entries: any[] };
+    expect(json.entries).toHaveLength(2);
+  });
+
+  it("GET /agentrun/scratchpad lists keys", async () => {
+    const res = await fetch(`${base}/agentrun/scratchpad`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { keys: unknown; count: number };
+    expect(json.count).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(json.keys)).toBe(true);
+    const keys = (json.keys as unknown[]).flat();
+    expect(keys).toContain("wf:step:1");
   });
 });
