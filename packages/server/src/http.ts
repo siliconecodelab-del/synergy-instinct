@@ -17,7 +17,7 @@ import { decodeEvent, systemTaskOf } from "@open-instinct/core";
 import type { AgentRuntime, HandleResult, InboundMessage, InstinctConfig, OutboundMessage, ScheduleEntry, Scheduler, StateDir } from "@open-instinct/core";
 import { DurableInbox, parseCallEnded, parseInkboxEvent, verifyInkboxSignature } from "@open-instinct/inkbox";
 import type { CallEndedEvent } from "@open-instinct/inkbox";
-import type { AgentRunAdapters, AgentRunResult, WorkflowStore } from "@open-instinct/agentrun";
+import { Scratchpad, TurnTraceRecorder, type TurnTrace, type TurnTraceInput, type AgentRunAdapters, type AgentRunResult, type WorkflowStore } from "@open-instinct/agentrun";
 import { inspectWorkflow, validateWorkflow, dryRunWorkflow, type Workflow } from "@parcha/agentrun-dsl";
 
 /** Replies the console outbox is holding for a chat conversation. */
@@ -405,11 +405,29 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
       if (!body || typeof (body as ChatRequest).message !== "string") {
         return sendJson(res, 400, { error: "expected JSON { message: string, source?, conversation_id? }" });
       }
+      // Per-turn trace recording for AgentRun observability.
+      let traceFinish: ((trace: Partial<TurnTrace>) => void) | undefined;
+      if (app.state) {
+        const recorder = new TurnTraceRecorder(app.state);
+        const turnInput: TurnTraceInput = {
+          conversationKey: `chat:${(body as ChatRequest).conversation_id ?? "default"}`,
+          channel: "chat",
+          from: "owner",
+          text: (body as ChatRequest).message,
+          messageId: `chat:${randomUUID()}`,
+          receivedAt: now().toISOString(),
+        };
+        const { turnId, finish } = recorder.start(turnInput, { id: "owner", tier: "owner", kind: "owner" });
+        traceFinish = finish;
+      }
+      const startMs = Date.now();
       try {
         const out = await handleChat(app, body as ChatRequest, now(), log);
+        if (traceFinish) traceFinish({ status: "completed", durationMs: Date.now() - startMs, reply: out.response });
         return sendJson(res, 200, out);
       } catch (err) {
         log(`chat failed: ${(err as Error).message}`);
+        if (traceFinish) traceFinish({ status: "error", durationMs: Date.now() - startMs });
         return sendJson(res, 500, { error: "agent error", response: "" });
       }
     }
@@ -493,6 +511,29 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
     if (app.agentrun && method === "GET" && path === "/agentrun/list") {
       const names = app.agentrun.store.list();
       return sendJson(res, 200, { workflows: names });
+    }
+
+    // Observability: per-turn traces (AgentRun observability layer).
+    if (app.agentrun && method === "GET" && path === "/agentrun/traces") {
+      const recorder = new TurnTraceRecorder(app.state!);
+      const turnIds: string[] = recorder.list();
+      const traces = turnIds.map((id: string) => recorder.read(id)).filter((t): t is TurnTrace => t !== undefined);
+      return sendJson(res, 200, { traces, count: traces.length });
+    }
+
+    if (app.agentrun && method === "GET" && path.startsWith("/agentrun/traces/")) {
+      const turnId = path.slice("/agentrun/traces/".length);
+      const recorder = new TurnTraceRecorder(app.state!);
+      const trace = recorder.read(turnId);
+      if (!trace) return sendJson(res, 404, { error: `trace not found: ${turnId}` });
+      return sendJson(res, 200, trace);
+    }
+
+    // Observability: idempotency scratchpad keys.
+    if (app.agentrun && method === "GET" && path === "/agentrun/scratchpad") {
+      const sp = new Scratchpad(app.state!);
+      const keys = sp.list();
+      return sendJson(res, 200, { keys, count: keys.length });
     }
 
     // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).

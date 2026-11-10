@@ -49,7 +49,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry, type Telemetry } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -614,8 +614,15 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   // typed workflows with recovery and decision recording.
   let agentrunStore: WorkflowStore | undefined;
   let agentrunDeps: ReturnType<typeof makeAdapters> | undefined;
+  let agentrunTelemetry: Telemetry | undefined;
   if (env.INSTINCT_AGENTRUN === "1") {
     agentrunStore = new WorkflowStore(state);
+    const agentrunScratchpad = new Scratchpad(state);
+    agentrunTelemetry = initTelemetry({
+      serviceName: "instinct-agent",
+      serviceVersion: process.env.npm_package_version,
+      log,
+    });
     agentrunDeps = makeAdapters({
       runtime,
       registry,
@@ -628,6 +635,8 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       ownerPrincipal: () => runtime.ownerPrincipal(),
       channel: "chat",
       now: () => new Date(),
+      scratchpad: agentrunScratchpad,
+      telemetry: agentrunTelemetry,
     });
     registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
     registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
@@ -699,7 +708,17 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.\n\n" +
       "Nudges are opt-in by schedule: a daily proactive SOP nudge is auto-registered on first boot when " +
       "AgentRun is enabled. After creating the first SOP, if that daily schedule is not already active, " +
-      "offer to enable it with `sop_proactive_nudge` (action='enable_schedule') so nudges run automatically.",
+      "offer to enable it with `sop_proactive_nudge` (action='enable_schedule') so nudges run automatically.\n\n" +
+      "# Observability Layer\n" +
+      "AgentRun is also your observability layer. Before any state-changing action, check the idempotency " +
+      "scratchpad for an existing result so you never execute the same state-changing step twice. Every " +
+      "turn is traced under <data>/agentrun/traces/<turnId>/trace.json, recording input, tools called, " +
+      "decisions, approvals, spend, and outcome — you can list traces with GET /agentrun/traces and " +
+      "inspect one with GET /agentrun/traces/<turnId>. Scratchpad keys are listed at GET " +
+      "/agentrun/scratchpad. When you find yourself doing the same multi-step procedure more than once, " +
+      "author it as an AgentRun DSL workflow (`agentrun` action='save'), give it a preflight ICM trace " +
+      "if it touches a folder workspace, and run it with `agentrun` action='run' so it is checkpointed, " +
+      "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.",
     );
   }
 
@@ -819,6 +838,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       await safely(log, "computer close", () => computer?.close());
       await safely(log, "apps close", () => apps?.close());
       await safely(log, "atomicmail close", () => mailbox?.close());
+      await safely(log, "telemetry shutdown", () => shutdownTelemetry(agentrunTelemetry!));
     },
   };
 }

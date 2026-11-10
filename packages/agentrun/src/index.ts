@@ -10,6 +10,9 @@
 export { makeAdapters, type AgentRunAdapterDeps } from "./adapters.js";
 export { runWorkflowWithRecovery, type AgentRunAdapters } from "./runner.js";
 export type { AgentRunResult, PreflightSpec } from "./types.js";
+export { Scratchpad } from "./scratchpad.js";
+export { TurnTraceRecorder, argsHash, type TurnTrace, type TurnTraceInput } from "./trace.js";
+export { initTelemetry, shutdownTelemetry, startSpan, spanSetAttributes, spanEnd, withSpan, type Telemetry } from "./telemetry.js";
 export { resolveTracerScript, runTracerCommand, readTraceResult, runPreflight, type TracerResult, type TracerCheck, type PreflightResult } from "./workflow-tracer.js";
 export { WorkflowStore } from "./store.js";
 export { PipelineStore, type PipelineRecord, type PipelineStageRecord, type PipelineSchedule } from "./pipeline-store.js";

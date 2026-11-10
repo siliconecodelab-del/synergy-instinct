@@ -5,6 +5,8 @@ import type { AgentRuntime, ApprovalStore, AuditLog, Outbox, PolicyEngine, Princ
 import type { Model } from "@earendil-works/pi-ai";
 import type { JevJudge } from "@parcha/agentrun-jev";
 import type { CodeNode, MapItem } from "@parcha/agentrun-dsl";
+import type { Scratchpad } from "./scratchpad.js";
+import type { Telemetry } from "./telemetry.js";
 
 export interface AgentRunAdapterDeps {
   /** Open Instinct runtime for conversation-backed agent steps. */
@@ -39,6 +41,10 @@ export interface AgentRunAdapterDeps {
   }) => Promise<unknown>;
   /** Clock. Defaults to system time. */
   now?: () => Date;
+  /** Idempotency scratchpad for caching state-changing step results. */
+  scratchpad?: Scratchpad;
+  /** OpenTelemetry telemetry for workflow-level spans. */
+  telemetry?: Telemetry;
 }
 
 /** Spec for a tracer-based pre-flight check attached to a workflow. */

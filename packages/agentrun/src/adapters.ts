@@ -29,6 +29,8 @@ import {
 } from "@open-instinct/core";
 import type { Outbox } from "@open-instinct/core";
 import type { AgentRunAdapterDeps } from "./types.js";
+import { Scratchpad } from "./scratchpad.js";
+import { startSpan, spanSetAttributes, spanEnd, type Telemetry } from "./telemetry.js";
 
 const RESULT_TOOL = "__agentrun_result__";
 
@@ -45,6 +47,8 @@ export function makeAdapters(deps: AgentRunAdapterDeps) {
     channel = "chat",
     jevRunner,
     runCode,
+    scratchpad,
+    telemetry,
     now = () => new Date(),
   } = deps;
 
@@ -107,11 +111,37 @@ export function makeAdapters(deps: AgentRunAdapterDeps) {
       });
     }
 
+    // Idempotency checkpoint: if this step already has a recorded result, reuse it.
+    if (scratchpad) {
+      const claim = scratchpad.claim(params.idempotencyKey);
+      if (!claim.ok) {
+        throw new Error(`Workflow call node "${node.label}": idempotency claim failed: ${claim.reason}`);
+      }
+      if (!claim.fresh) {
+        return claim.result;
+      }
+    }
+
     // Execute
     try {
+      const span = startSpan(telemetry, `tool.${node.tool}`, {
+        "workflow.node": node.label,
+        "workflow.tool": node.tool,
+        "workflow.attempt": params.attempt,
+      });
       const result = await tool.spec.execute(input, ctx, signal);
+      spanSetAttributes(span, { "tool.outcome": "ok" });
+      if (scratchpad) scratchpad.record(params.idempotencyKey, result);
+      spanEnd(span);
       return result;
     } catch (err) {
+      const span = startSpan(telemetry, `tool.${node.tool}`, {
+        "workflow.node": node.label,
+        "workflow.tool": node.tool,
+        "workflow.attempt": params.attempt,
+        "tool.outcome": "error",
+      });
+      spanEnd(span, { code: 2, message: err instanceof Error ? err.message : String(err) });
       audit.append({
         kind: "error",
         conversationKey: ctx.conversationKey,
@@ -139,62 +169,71 @@ export function makeAdapters(deps: AgentRunAdapterDeps) {
     const runtime: AgentRuntime = deps.runtime;
     const principal = ownerPrincipal();
 
-    // Conversation key for this workflow node run
-    const convKey = `agentrun:node:${label}`;
-    const conv = runtime.conversation(convKey, principal, { deliveryKey: convKey, replyRef: {} });
+    const span = startSpan(telemetry, `node.${label}`, {
+      "workflow.node": label,
+      "workflow.node.kind": kind,
+    });
 
-    // Build the tools available to this node: registry tools filtered by names,
-    // plus a result capture tool that stores the structured answer.
-    const available = registry.all();
-    const nodeTools: AgentTool<any>[] = [];
-    if (toolNames && toolNames.length > 0) {
-      const wanted = new Set(toolNames);
-      for (const t of available) {
-        if (wanted.has(t.spec.name)) nodeTools.push(toAgentTool(t));
+    try {
+      // Conversation key for this workflow node run
+      const convKey = `agentrun:node:${label}`;
+      const conv = runtime.conversation(convKey, principal, { deliveryKey: convKey, replyRef: {} });
+
+      // Build the tools available to this node: registry tools filtered by names,
+      // plus a result capture tool that stores the structured answer.
+      const available = registry.all();
+      const nodeTools: AgentTool<any>[] = [];
+      if (toolNames && toolNames.length > 0) {
+        const wanted = new Set(toolNames);
+        for (const t of available) {
+          if (wanted.has(t.spec.name)) nodeTools.push(toAgentTool(t));
+        }
+      } else {
+        // No tool restriction: expose all registry tools (full surface per policy).
+        for (const t of available) nodeTools.push(toAgentTool(t));
       }
-    } else {
-      // No tool restriction: expose all registry tools (full surface per policy).
-      for (const t of available) nodeTools.push(toAgentTool(t));
-    }
 
-    let captured: unknown = undefined;
-    const resultTool: AgentTool<any> = {
-      name: RESULT_TOOL,
-      label: "Capture structured result",
-      description: `Submit the structured answer for node "${label}" matching the declared output schema.`,
-      parameters: schema as Record<string, unknown>,
-      execute: async (_id, args) => {
-        captured = args;
-        return { content: [{ type: "text", text: "Result captured." }], details: undefined };
-      },
-    };
+      let captured: unknown = undefined;
+      const resultTool: AgentTool<any> = {
+        name: RESULT_TOOL,
+        label: "Capture structured result",
+        description: `Submit the structured answer for node "${label}" matching the declared output schema.`,
+        parameters: schema as Record<string, unknown>,
+        execute: async (_id, args) => {
+          captured = args;
+          return { content: [{ type: "text", text: "Result captured." }], details: undefined };
+        },
+      };
 
-    conv.agent.state.tools = [...nodeTools, resultTool];
+      conv.agent.state.tools = [...nodeTools, resultTool];
 
-    // Build system prompt: node instructions + directive to use the result tool.
-    const systemText = system.length > 0 ? system.join("\n\n") : "";
-    const resultInstruction = `
+      // Build system prompt: node instructions + directive to use the result tool.
+      const systemText = system.length > 0 ? system.join("\n\n") : "";
+      const resultInstruction = `
 You are running workflow node "${label}" (kind: ${kind}).
 Your job is to produce a structured result matching the declared output schema.
 When you have the answer, call the "__agentrun_result__" tool with the structured fields.
 Do not add extra text after calling the tool. The tool result is the final answer.
 `;
-    const prompt = `${systemText}${resultInstruction}\n\n---\nInput (state):\n${user}`;
+      const prompt = `${systemText}${resultInstruction}\n\n---\nInput (state):\n${user}`;
 
-    // Manually set the system message (Conversation.applySystemPrompt is private).
-    const tools = conv.agent.state.tools.map(toToolDeclaration);
-    const systemMsg = createInitialSystemMessage(prompt, tools);
-    const rest = conv.agent.state.messages.filter((m) => m.role !== "system");
-    conv.agent.state.messages = systemMsg ? [systemMsg, ...rest] : rest;
+      // Manually set the system message (Conversation.applySystemPrompt is private).
+      const tools = conv.agent.state.tools.map(toToolDeclaration);
+      const systemMsg = createInitialSystemMessage(prompt, tools);
+      const rest = conv.agent.state.messages.filter((m) => m.role !== "system");
+      conv.agent.state.messages = systemMsg ? [systemMsg, ...rest] : rest;
 
-    await conv.agent.prompt(user);
-    await conv.agent.waitForIdle();
+      await conv.agent.prompt(user);
+      await conv.agent.waitForIdle();
 
-    if (captured === undefined) {
-      throw new Error(`Workflow node "${label}" (${kind}): no structured result captured; the model did not call "${RESULT_TOOL}".`);
+      if (captured === undefined) {
+        throw new Error(`Workflow node "${label}" (${kind}): no structured result captured; the model did not call "${RESULT_TOOL}".`);
+      }
+
+      return captured;
+    } finally {
+      spanEnd(span, { code: 1 });
     }
-
-    return captured;
   };
 
   // ------------------------------------------------------------------
@@ -244,14 +283,24 @@ Do not add extra text after calling the tool. The tool result is the final answe
     request_sha256?: string;
   }> => {
     const { label, kind, state, questions, signal } = params;
-    const result = await jev({ label, kind, state, questions, signal, decisionId: params.decisionId });
-    return {
-      answers: result.answers,
-      model: result.model ?? null,
-      usage: result.usage ?? null,
-      cost_usd: result.cost_usd ?? null,
-      request_sha256: result.request_sha256,
-    };
+    const span = startSpan(telemetry, `decision.${kind}`, {
+      "workflow.decision.label": label,
+      "workflow.decision.kind": kind,
+    });
+    try {
+      const result = await jev({ label, kind, state, questions, signal, decisionId: params.decisionId });
+      spanEnd(span, { code: 1 });
+      return {
+        answers: result.answers,
+        model: result.model ?? null,
+        usage: result.usage ?? null,
+        cost_usd: result.cost_usd ?? null,
+        request_sha256: result.request_sha256,
+      };
+    } catch (err) {
+      spanEnd(span, { code: 2, message: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }
   };
 
   return { runEffect, runNode, runJudge, runCode: runCode ?? undefined };
