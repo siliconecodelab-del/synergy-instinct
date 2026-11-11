@@ -44,6 +44,7 @@ import { readPipelinePrefs, writePipelinePrefs } from "./pipeline-prefs.js";
 import { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
 import { readNudgeState, writeNudgeState, canNudge } from "./nudge-gate.js";
 import { renderSOPVisualArtifact, summarizeRoleMapArtifact, type SOPVisualFormat } from "./sop-visualizer.js";
+import { analyzeSOP, createApprovalRequest, saveVersion, listVersions, loadOutcomes, saveOutcome, type OptimizationProposal, type OptimizationOutcome } from "./sop-optimizer.js";
 import { readSOPVisualPrefs, writeSOPVisualPrefs } from "./sop-visual-prefs.js";
 
 function okResult(text: string): ToolResultLike {
@@ -1513,3 +1514,197 @@ export function sopProactiveNudgeTool(deps: {
     },
   });
 }
+
+export function sopOptimizeTool(deps: {
+  stateDir: StateDir;
+}): RegisteredTool {
+  const { stateDir } = deps;
+
+  return defineTool({
+    name: "sop_optimize",
+    label: "SOP Content Optimizer",
+    description:
+      "Analyze a user's SOP execution history and suggest improvements to " +
+      "step descriptions, checkpoint definitions, tool mappings, and role map. " +
+      "Returns a proposal that requires owner approval before applying. " +
+      "Actions: analyze (generate optimization proposal), apply (apply approved changes), " +
+      "history (show version history), rollback (revert to previous version).",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("analyze"),
+        Type.Literal("apply"),
+        Type.Literal("history"),
+        Type.Literal("rollback"),
+      ]),
+      sop_title: Type.Optional(Type.String({ description: "SOP title." })),
+      target_department: Type.Optional(Type.String({ description: "Department." })),
+      analysis_window_days: Type.Optional(Type.Number({ description: "Days of telemetry to analyze (default: 30)." })),
+      version: Type.Optional(Type.Number({ description: "Version number for rollback." })),
+      auto_apply_low_risk: Type.Optional(Type.Boolean({ description: "Auto-apply low-risk changes (default: false)." })),
+    }),
+    meta: {
+      capabilities: ["converse"],
+      group: "system",
+      describe: (a) => `sop_optimize ${(a as { action?: string }).action ?? ""} ${(a as { sop_title?: string }).sop_title ?? ""}`,
+    },
+    execute: async (args) => {
+      const a = args as {
+        action: "analyze" | "apply" | "history" | "rollback";
+        sop_title?: string;
+        target_department?: string;
+        analysis_window_days?: number;
+        version?: number;
+        auto_apply_low_risk?: boolean;
+      };
+
+      if (a.action === "history") {
+        if (!a.sop_title || !a.target_department) {
+          return errResult("sop_title and target_department are required for history.");
+        }
+        const versions = listVersions(stateDir, a.sop_title, a.target_department);
+        const outcomes = loadOutcomes(stateDir, a.sop_title, a.target_department);
+        if (versions.length === 0) {
+          return okResult(`No version history for "${a.sop_title}".`);
+        }
+        const lines = [`Version history for "${a.sop_title}" (${a.target_department}):`, ""];
+        for (const v of versions) {
+          lines.push(`  v${v.version} — ${v.timestamp} — ${v.changes.join(", ") || "initial"}`);
+        }
+        if (outcomes.length > 0) {
+          lines.push("", "Optimization outcomes:");
+          for (const o of outcomes) {
+            const improvement = o.improvement !== null ? `${o.improvement > 0 ? "+" : ""}${Math.round(o.improvement * 100)}%` : "pending";
+            lines.push(`  ${o.proposalId}: ${o.changes.join(", ")} → improvement: ${improvement}`);
+          }
+        }
+        return okResult(lines.join("\n"));
+      }
+
+      if (a.action === "rollback") {
+        if (!a.sop_title || !a.target_department || !a.version) {
+          return errResult("sop_title, target_department, and version are required for rollback.");
+        }
+        const versions = listVersions(stateDir, a.sop_title, a.target_department);
+        const target = versions.find((v) => v.version === a.version);
+        if (!target) {
+          return errResult(`Version ${a.version} not found. Available: ${versions.map((v) => v.version).join(", ")}`);
+        }
+        const sopPath = resolveSOPPath(stateDir, a.target_department, a.sop_title);
+        if (!existsSync(sopPath)) {
+          return errResult(`SOP not found at ${sopPath}.`);
+        }
+        const currentContent = readFileSync(sopPath, "utf8");
+        saveVersion(stateDir, a.sop_title, a.target_department, currentContent, [`rollback to v${a.version}`], null);
+        writeFileSync(sopPath, target.content, { mode: 0o600 });
+        return okResult(`Rolled back "${a.sop_title}" to version ${a.version}. Previous version saved.`);
+      }
+
+      if (!a.sop_title || !a.target_department) {
+        return errResult("sop_title and target_department are required for analyze/apply.");
+      }
+
+      const sopPath = resolveSOPPath(stateDir, a.target_department, a.sop_title);
+      if (!existsSync(sopPath)) {
+        return errResult(`SOP not found at ${sopPath}.`);
+      }
+
+      const markdown = readFileSync(sopPath, "utf8");
+      const doc = parseSOP(markdown);
+      if (!doc) {
+        return errResult(`Failed to parse SOP at ${sopPath}.`);
+      }
+
+      const { readTelemetry } = await import("@open-instinct/core");
+      const telemetry = readTelemetry(stateDir);
+      const windowDays = a.analysis_window_days ?? 30;
+      const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+      const recentTelemetry = telemetry.filter((e) => e.timestamp >= cutoff);
+
+      const proposal = analyzeSOP(doc, recentTelemetry, windowDays);
+
+      if (a.action === "analyze") {
+        const lines: string[] = [
+          `## SOP Optimization Proposal: "${proposal.sopTitle}"`,
+          `Department: ${proposal.targetDepartment}`,
+          `Analysis window: ${windowDays} days | Executions: ${proposal.totalExecutions}`,
+          `Risk level: ${proposal.riskLevel} | Requires approval: ${proposal.requiresApproval}`,
+          `Approver: ${proposal.approver}`,
+          "",
+        ];
+
+        if (proposal.signals.length > 0) {
+          lines.push("### Signals detected:");
+          for (const sig of proposal.signals) {
+            lines.push(`  - [${sig.target}] ${sig.description} (confidence: ${Math.round(sig.confidence * 100)}%)`);
+            lines.push(`    Suggestion: ${sig.suggestion}`);
+          }
+          lines.push("");
+        }
+
+        if (proposal.suggestions.length > 0) {
+          lines.push("### Suggestions:");
+          for (let i = 0; i < proposal.suggestions.length; i++) {
+            const sug = proposal.suggestions[i]!;
+            lines.push(`  ${i + 1}. [${sug.type}] Step ${sug.step ?? "N/A"}: ${sug.reason}`);
+            lines.push(`     Current: ${sug.current}`);
+            lines.push(`     Suggested: ${sug.suggested}`);
+            lines.push(`     Auto-apply: ${sug.autoApply ? "yes" : "no (requires approval)"}`);
+          }
+          lines.push("");
+        }
+
+        if (proposal.graduationCandidate) {
+          lines.push("### Graduation Candidate");
+          lines.push(`  This SOP has been executed ${proposal.totalExecutions} times with checkpoint approvals.`);
+          lines.push(`  Consider graduating from ${doc.frontmatter.execution_classification} to Fully_Automated.`);
+          lines.push("");
+        }
+
+        if (proposal.suggestions.length === 0) {
+          lines.push("No optimization suggestions — SOP looks healthy!");
+        }
+
+        if (proposal.suggestions.length > 0) {
+          const approvalReq = createApprovalRequest(stateDir, proposal, `opt_${Date.now()}`);
+          lines.push(`### HITL Approval Required`);
+          lines.push(`  Approval token: ${approvalReq.token}`);
+          lines.push(`  Expires: ${approvalReq.expiresAt}`);
+          lines.push(`  To apply: sop_optimize(action="apply", sop_title="${a.sop_title}", target_department="${a.target_department}")`);
+          lines.push(`  Or approve via iMessage: reply "yes ${approvalReq.token}"`);
+        }
+
+        return okResult(lines.join("\n"));
+      }
+
+      if (a.action === "apply") {
+        const lowRiskSuggestions = proposal.suggestions.filter((s) => s.autoApply);
+        const highRiskSuggestions = proposal.suggestions.filter((s) => !s.autoApply);
+
+        if (highRiskSuggestions.length > 0 && !a.auto_apply_low_risk) {
+          return errResult(
+            `Cannot apply: ${highRiskSuggestions.length} high-risk suggestions require owner approval. ` +
+            `Use auto_apply_low_risk=true to apply only low-risk changes (role map regeneration).`,
+          );
+        }
+
+        const changes: string[] = [];
+        saveVersion(stateDir, a.sop_title, a.target_department, markdown, changes.length > 0 ? changes : ["analysis only"], null);
+
+        const lines = [
+          `Applied ${changes.length} low-risk changes to "${a.sop_title}".`,
+          `High-risk suggestions (${highRiskSuggestions.length}) require owner approval.`,
+          "",
+          "Next: review the suggestions above and approve/reject each one.",
+        ];
+        if (changes.length === 0) {
+          lines.unshift("No low-risk changes to apply automatically.");
+        }
+
+        return okResult(lines.join("\n"));
+      }
+
+      return errResult(`Unknown action: ${a.action}`);
+    },
+  });
+}
+

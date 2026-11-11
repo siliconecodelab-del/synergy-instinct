@@ -21,7 +21,7 @@ export { readPipelinePrefs, writePipelinePrefs, type PipelinePrefs, type Pipelin
 export { readSOPVisualPrefs, writeSOPVisualPrefs, type SOPVisualPrefs, type SOPVisualPrefFormat } from "./sop-visual-prefs.js";
 export { buildSOPArchifySpec, renderSOPVisualArtifact, summarizeRoleMapArtifact, resolveArchifyCli, resolveChrome, resolveFfmpeg, sopSlug, type ArchifyWorkflowSpec, type SOPVisualArtifact, type SOPVisualFormat, type SOPRenderedFormat, type SOPVisualRenderOptions } from "./sop-visualizer.js";
 export { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
-export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, DEEP_RESEARCH_TOOLKITS, buildSOPToolResearchPrompt, type SOPToolResearchOptions, type SOPToolResearchPlan } from "./tool.js";
+export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, DEEP_RESEARCH_TOOLKITS, buildSOPToolResearchPrompt, type SOPToolResearchOptions, type SOPToolResearchPlan } from "./tool.js";
 export { buildSOPRoleMap, type SOPRoleMap } from "./sop-okf.js";
 export { icmToDsl, isHumanCheckpointStage, saveDslWorkflow, type IcmToDslResult } from "./icm-to-dsl.js";
 export { createPiAgentRunExtension, type PiExtensionAPI } from "./pi-extension.js";
