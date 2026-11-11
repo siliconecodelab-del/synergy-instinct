@@ -23,7 +23,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry } from "@open-instinct/agentrun";
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
 const SKILLS_REFRESH_MS = 30_000;
 export const DEFAULT_MARITIME_MCP_URL = "https://mcp.maritime.sh";
@@ -521,8 +521,15 @@ export async function boot(env, opts = {}) {
     // typed workflows with recovery and decision recording.
     let agentrunStore;
     let agentrunDeps;
+    let agentrunTelemetry;
     if (env.INSTINCT_AGENTRUN === "1") {
         agentrunStore = new WorkflowStore(state);
+        const agentrunScratchpad = new Scratchpad(state);
+        agentrunTelemetry = initTelemetry({
+            serviceName: "instinct-agent",
+            serviceVersion: process.env.npm_package_version,
+            log,
+        });
         agentrunDeps = makeAdapters({
             runtime,
             registry,
@@ -535,12 +542,15 @@ export async function boot(env, opts = {}) {
             ownerPrincipal: () => runtime.ownerPrincipal(),
             channel: "chat",
             now: () => new Date(),
+            scratchpad: agentrunScratchpad,
+            telemetry: agentrunTelemetry,
         });
         registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
         registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
         registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
         registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
         registry.register(sopProactiveNudgeTool({ stateDir: state, composio: apps }));
+        registry.register(sopVisualizeRoleMapTool({ stateDir: state }));
         registry.register(workflowTraceTool({ stateDir: state }));
         registry.register(pipelineStatusTool({ stateDir: state }));
         registry.register(pipelinePrefsTool({ stateDir: state }));
@@ -550,6 +560,24 @@ export async function boot(env, opts = {}) {
         registry.register(nudgeGateTool({ stateDir: state }));
         // Code-level pipeline store (no legacy migration; legacy records removed).
         const pipelineStore = new PipelineStore(state);
+        // Auto-register the daily proactive SOP nudge schedule on first boot so nudges
+        // do not depend on a manual enable_schedule call. Idempotent: an existing
+        // entry with this name is left untouched.
+        try {
+            if (!scheduler.list().some((e) => e.name === "sop-proactive-nudge-daily")) {
+                scheduler.create({
+                    name: "sop-proactive-nudge-daily",
+                    prompt: "Run sop_proactive_nudge with action='scan'. If a nudge is allowed and returned, send the compact role-aware nudge message to the owner.",
+                    enabled: true,
+                    cron: "0 9 * * *",
+                    tz: "UTC",
+                });
+                log("agentrun: auto-registered daily proactive SOP nudge schedule");
+            }
+        }
+        catch (err) {
+            log(`agentrun: failed to auto-register nudge schedule: ${err.message}`);
+        }
         // Inject the owner's pipeline mode preference into the AgentRun prompt so
         // the agent knows whether to auto-advance or confirm per stage.
         const pipelinePrefs = readPipelinePrefs(state);
@@ -579,7 +607,20 @@ export async function boot(env, opts = {}) {
             "Every SOP defines an explicit Role Map ('Where You Fit vs. Where the Agent Fits') based on its " +
             "`execution_classification` (`Manual` | `Hybrid` | `Fully_Automated`). Always surface this Role Map " +
             "to the owner when creating or nudging about an SOP while keeping internal engine stages (ICM/tracer/DSL) " +
-            "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.");
+            "abstracted away. SOPs are written to <data>/Company-brain/SOPs/<department>/<sop_title>.md.\n\n" +
+            "Nudges are opt-in by schedule: a daily proactive SOP nudge is auto-registered on first boot when " +
+            "AgentRun is enabled. After creating the first SOP, if that daily schedule is not already active, " +
+            "offer to enable it with `sop_proactive_nudge` (action='enable_schedule') so nudges run automatically.\n\n" +
+            "# Observability Layer\n" +
+            "AgentRun is also your observability layer. Before any state-changing action, check the idempotency " +
+            "scratchpad for an existing result so you never execute the same state-changing step twice. Every " +
+            "turn is traced under <data>/agentrun/traces/<turnId>/trace.json, recording input, tools called, " +
+            "decisions, approvals, spend, and outcome — you can list traces with GET /agentrun/traces and " +
+            "inspect one with GET /agentrun/traces/<turnId>. Scratchpad keys are listed at GET " +
+            "/agentrun/scratchpad. When you find yourself doing the same multi-step procedure more than once, " +
+            "author it as an AgentRun DSL workflow (`agentrun` action='save'), give it a preflight ICM trace " +
+            "if it touches a folder workspace, and run it with `agentrun` action='run' so it is checkpointed, " +
+            "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.");
     }
     // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).
     // Exposes the agent's config, persona, instructions and skills so the owner
@@ -674,6 +715,7 @@ export async function boot(env, opts = {}) {
             await safely(log, "computer close", () => computer?.close());
             await safely(log, "apps close", () => apps?.close());
             await safely(log, "atomicmail close", () => mailbox?.close());
+            await safely(log, "telemetry shutdown", () => shutdownTelemetry(agentrunTelemetry));
         },
     };
 }

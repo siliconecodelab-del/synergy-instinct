@@ -1,5 +1,11 @@
 /**
  * Maritime API client for calling an instinct agent's /chat endpoint.
+ *
+ * Supports two modes:
+ *   1. Maritime mode (default): resolves agent ID via Maritime API, then calls
+ *      Maritime's /chat endpoint. Used in production.
+ *   2. Local mode: when AGENT_CHAT_URL is set, calls the local agent directly
+ *      without Maritime lookup. Used in local dev.
  */
 
 export interface MaritimeConfig {
@@ -7,6 +13,11 @@ export interface MaritimeConfig {
   apiKey: string;        // Maritime API key
   agentId: string;       // Maritime agent ID (resolved at runtime)
   externalId: string;    // Gateway user ID (used to find agent)
+  chatToken?: string;    // INSTINCT_CHAT_TOKEN for agent auth
+}
+
+export interface LocalAgentConfig {
+  chatUrl: string;       // http://127.0.0.1:8099/chat
   chatToken?: string;    // INSTINCT_CHAT_TOKEN for agent auth
 }
 
@@ -74,6 +85,74 @@ async function fetchWithRetry(
 
   throw lastError ?? new Error("Request failed after retries");
 }
+
+// ── Local agent client (for local dev) ────────────────────────────────────
+
+export class LocalAgentClient {
+  private config: LocalAgentConfig;
+
+  constructor(config: LocalAgentConfig) {
+    this.config = config;
+  }
+
+  async chat(message: string, conversationId: string, source: string = "open-webui"): Promise<{
+    response: string;
+    acked: boolean;
+    conversationKey?: string;
+    blocked?: string;
+    pending?: string[];
+  }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (this.config.chatToken) {
+      headers["Authorization"] = `Bearer ${this.config.chatToken}`;
+    }
+
+    const body = {
+      message,
+      source,
+      conversation_id: conversationId,
+    };
+
+    const res = await fetchWithRetry(
+      this.config.chatUrl,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      },
+      { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 4000, retryableStatuses: [408, 429, 500, 502, 503, 504] },
+    );
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Local agent chat failed: ${res.status} ${text.slice(0, 200)}`);
+    }
+
+    return (await res.json()) as {
+      response: string;
+      acked: boolean;
+      conversationKey?: string;
+      blocked?: string;
+      pending?: string[];
+    };
+  }
+
+  async health(): Promise<boolean> {
+    try {
+      // Derive health URL from chat URL
+      const healthUrl = this.config.chatUrl.replace(/\/chat\/?$/, "/health");
+      const res = await fetch(healthUrl);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+// ── Maritime agent client (for production) ───────────────────────────────
 
 export class MaritimeClient {
   private config: MaritimeConfig;
@@ -183,9 +262,27 @@ export class MaritimeClient {
 }
 
 /**
- * Create a MaritimeClient from environment variables.
+ * Unified agent client interface.
+ * In local mode (AGENT_CHAT_URL set), calls the local agent directly.
+ * In production mode, resolves and calls Maritime agent.
  */
-export function createMaritimeClientFromEnv(): MaritimeClient {
+export type AgentClient = MaritimeClient | LocalAgentClient;
+
+/**
+ * Create an agent client from environment variables.
+ * If AGENT_CHAT_URL is set, uses local mode (no Maritime lookup).
+ * Otherwise, uses Maritime mode (requires MARITIME_API_KEY and MARITIME_EXTERNAL_ID).
+ */
+export function createAgentClientFromEnv(): AgentClient {
+  const localChatUrl = process.env.AGENT_CHAT_URL;
+  if (localChatUrl) {
+    console.log(`[adapter] Local mode: calling agent at ${localChatUrl}`);
+    return new LocalAgentClient({
+      chatUrl: localChatUrl,
+      chatToken: process.env.INSTINCT_CHAT_TOKEN,
+    });
+  }
+
   const baseUrl = process.env.MARITIME_API_URL || "https://api.maritime.sh";
   const apiKey = process.env.MARITIME_API_KEY || "";
   const externalId = process.env.MARITIME_EXTERNAL_ID || process.env.MARITIME_AGENT_ID || "";

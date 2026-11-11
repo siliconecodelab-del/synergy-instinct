@@ -1,0 +1,52 @@
+services:
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main-slim@sha256:8524b2caead985df0fa9e49ccc928dae3f761a93d614d2cb44635388cbbd6a4a
+    container_name: openwebui-local
+    ports:
+      - "8385:8080"
+    environment:
+      PORT: "8080"
+      ENV: "dev"
+      FORWARDED_ALLOW_IPS: "*"
+      OPENWEBUI_BLOCK_FLY_HOST: "false"
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: "http://host.docker.internal:8081"
+      OPENAI_API_KEY: "${ADAPTER_TOKEN:-local-dev-token}"
+      DEFAULT_MODELS: "${MODEL_ID:-instinct-agent-local}"
+      WEBUI_AUTH: "false"
+      WEBUI_SECRET_KEY: "local-dev-secret"
+      ENABLE_LOGIN_FORM: "true"
+      ENABLE_PASSWORD_AUTH: "true"
+      ENABLE_PASSWORD_CHANGE_FORM: "true"
+      ENABLE_SIGNUP: "true"
+      ENABLE_OAUTH_SIGNUP: "false"
+      ENABLE_OAUTH_PERSISTENT_CONFIG: "false"
+      ENABLE_OPENAI_API_PASSTHROUGH: "false"
+      ENABLE_DIRECT_CONNECTIONS: "false"
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_CODE_EXECUTION: "false"
+      ENABLE_CODE_INTERPRETER: "false"
+      ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS: "false"
+      OFFLINE_MODE: "true"
+      HF_HUB_OFFLINE: "1"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      RAG_EMBEDDING_ENGINE: "openai"
+      RAG_EMBEDDING_MODEL: "text-embedding-3-small"
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "false"
+      WHISPER_MODEL_AUTO_UPDATE: "false"
+      ENABLE_RAG_LOCAL_WEB_FETCH: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      RAG_RERANKING_MODEL_AUTO_UPDATE: "false"
+      DEFAULT_USER_ROLE: "admin"
+      JWT_EXPIRES_IN: "24h"
+      WEBUI_SESSION_COOKIE_SECURE: "false"
+      WEBUI_SESSION_COOKIE_SAME_SITE: "lax"
+    volumes:
+      - openwebui_data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  openwebui_data:

@@ -6,6 +6,8 @@
  * Actions map to `@parcha/agentrun-dsl` operations plus Open Instinct storage.
  */
 import { Type } from "typebox";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler } from "@open-instinct/core";
 import {
   inspectWorkflow,
@@ -41,6 +43,8 @@ import { icmToDsl, saveDslWorkflow, type IcmToDslResult } from "./icm-to-dsl.js"
 import { readPipelinePrefs, writePipelinePrefs } from "./pipeline-prefs.js";
 import { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
 import { readNudgeState, writeNudgeState, canNudge } from "./nudge-gate.js";
+import { renderSOPVisualArtifact, summarizeRoleMapArtifact, type SOPVisualFormat } from "./sop-visualizer.js";
+import { readSOPVisualPrefs, writeSOPVisualPrefs } from "./sop-visual-prefs.js";
 
 function okResult(text: string): ToolResultLike {
   return { content: [{ type: "text", text }] };
@@ -363,6 +367,94 @@ export function sopArchitectTool(deps: {
 }
 
 /**
+ * Build the `sop_visualize_role_map` RegisteredTool: compiles an existing SOP
+ * into its visual Role Map ("where you fit vs. where the agent fits") and
+ * renders the deliverable artifacts (interactive web link, animated GIF/MP4,
+ * one-page PDF playbook). Returns workspace paths plus the exact next tool
+ * calls so the agent can send or deploy them in the same turn.
+ */
+export function sopVisualizeRoleMapTool(deps: {
+  stateDir: StateDir;
+}): RegisteredTool {
+  const { stateDir } = deps;
+
+  return defineTool({
+    name: "sop_visualize_role_map",
+    label: "Visualize SOP role map",
+    description:
+      "Render the visual Role Map for an existing SOP: where you (human) fit vs. where the " +
+      "agent fits, across You / Agent / Tools swimlanes. Produces an interactive web link " +
+      "(ample_deploy), an animated GIF/MP4 (send_file, iMessage-inline), and/or a one-page " +
+      "PDF playbook (send_file), and returns the exact next tool calls to deliver them. " +
+      "Run this right after generate_dynamic_sop or after graduating a SOP (Manual → Hybrid → " +
+      "Fully_Automated). Parameters: sop_title, target_department, format, set_as_default.",
+    parameters: Type.Object({
+      sop_title: Type.String({ description: "The title of an existing SOP." }),
+      target_department: Type.String({ description: "Owning department of the SOP." }),
+      format: Type.Optional(
+        Type.Union([
+          Type.Literal("gif"),
+          Type.Literal("mp4"),
+          Type.Literal("pdf"),
+          Type.Literal("web"),
+          Type.Literal("all"),
+          Type.Literal("off"),
+        ], {
+          description:
+            "What to render. Omit to use the owner's stored default (gif unless changed). " +
+            "'all' renders web + gif + mp4 + pdf; 'off' only applies with set_as_default.",
+        }),
+      ),
+      set_as_default: Type.Optional(
+        Type.Boolean({
+          description: "Also save `format` as the owner's default for future Role Maps (requires `format`).",
+        }),
+      ),
+    }),
+    meta: {
+      capabilities: ["converse"],
+      group: "system",
+      describe: (args) => `sop_visualize_role_map ${String((args as { sop_title?: unknown }).sop_title ?? "")}`,
+    },
+    execute: async (args) => {
+      const prefs = readSOPVisualPrefs(stateDir);
+
+      if (args.set_as_default) {
+        if (!args.format) {
+          return errResult("Pass `format` together with `set_as_default: true` to save an owner default.");
+        }
+        writeSOPVisualPrefs(stateDir, { format: args.format });
+      }
+
+      const format: SOPVisualFormat | "off" = args.format ?? prefs.format;
+      if (format === "off") {
+        const prefix = args.set_as_default ? "Saved: " : "";
+        return okResult(
+          `${prefix}Automatic visual Role Maps are off for this owner. Nothing was rendered; ` +
+            "pass an explicit `format` (gif | mp4 | pdf | web | all) to render one anyway.",
+        );
+      }
+
+      const path = resolveSOPPath(stateDir, args.target_department, args.sop_title);
+      if (!existsSync(path)) {
+        return errResult(`SOP not found at ${path}.`);
+      }
+      const doc = parseSOP(readFileSync(path, "utf8"));
+      if (!doc) {
+        return errResult(`Failed to parse SOP at ${path}.`);
+      }
+
+      try {
+        const artifact = await renderSOPVisualArtifact(doc, stateDir, { format });
+        return okResult(summarizeRoleMapArtifact(doc, artifact));
+      } catch (err) {
+        return errResult(`Role Map render failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  });
+}
+
+/**
  * Build the `sop_check_required_tools` RegisteredTool: checks which tools
  * referenced by an SOP are connected via Composio, and returns connect links
  * for missing ones.
@@ -399,12 +491,11 @@ export function sopCheckRequiredToolsTool(deps: {
       }
 
       const path = resolveSOPPath(stateDir, args.target_department, args.sop_title);
-      const fs = require("node:fs");
-      if (!fs.existsSync(path)) {
+      if (!existsSync(path)) {
         return errResult(`SOP not found at ${path}.`);
       }
 
-      const markdown = fs.readFileSync(path, "utf8");
+      const markdown = readFileSync(path, "utf8");
       const doc = (await import("./sop-okf.js")).parseSOP(markdown);
       if (!doc) {
         return errResult(`Failed to parse SOP at ${path}.`);
@@ -655,8 +746,6 @@ export function sopResearchToolAlternativesTool(deps: {
       },
     },
     execute: async (args) => {
-      const fs = require("node:fs") as typeof import("node:fs");
-      const path = require("node:path") as typeof import("node:path");
       const action = args.action ?? "schedule";
       const configDir = stateDir.path("agentrun", "sop-research");
 
@@ -664,17 +753,17 @@ export function sopResearchToolAlternativesTool(deps: {
       // list — show all configured SOP tool-research jobs
       // ------------------------------------------------------------------
       if (action === "list") {
-        if (!fs.existsSync(configDir)) {
+        if (!existsSync(configDir)) {
           return okResult("No SOP tool-research schedules configured.");
         }
-        const files = fs.readdirSync(configDir).filter((f: string) => f.endsWith(".json"));
+        const files = readdirSync(configDir).filter((f: string) => f.endsWith(".json"));
         if (files.length === 0) {
           return okResult("No SOP tool-research schedules configured.");
         }
         const lines: string[] = [];
         for (const file of files) {
           try {
-            const cfg = JSON.parse(fs.readFileSync(path.join(configDir, file), "utf8"));
+            const cfg = JSON.parse(readFileSync(join(configDir, file), "utf8"));
             const targetsList = Array.isArray(cfg.targets)
               ? cfg.targets.join(", ")
               : Array.isArray(cfg.tools)
@@ -706,16 +795,16 @@ export function sopResearchToolAlternativesTool(deps: {
       // ------------------------------------------------------------------
       if (action === "unschedule") {
         let removedJobId: string | undefined;
-        if (fs.existsSync(configPath)) {
+        if (existsSync(configPath)) {
           try {
-            const existing = JSON.parse(fs.readFileSync(configPath, "utf8"));
+            const existing = JSON.parse(readFileSync(configPath, "utf8"));
             if (existing.jobId) {
               scheduler.delete(existing.jobId);
               removedJobId = existing.jobId;
             }
             existing.scheduled = false;
             delete existing.jobId;
-            fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+            writeFileSync(configPath, JSON.stringify(existing, null, 2));
           } catch {
             // ignore
           }
@@ -735,11 +824,11 @@ export function sopResearchToolAlternativesTool(deps: {
       // schedule | run_now — parse SOP and build 3-tier Deep Research plan
       // ------------------------------------------------------------------
       const sopPath = resolveSOPPath(stateDir, args.target_department, args.sop_title);
-      if (!fs.existsSync(sopPath)) {
+      if (!existsSync(sopPath)) {
         return errResult(`SOP not found at ${sopPath}.`);
       }
 
-      const markdown = fs.readFileSync(sopPath, "utf8");
+      const markdown = readFileSync(sopPath, "utf8");
       const doc = parseSOP(markdown);
       if (!doc) {
         return errResult(`Failed to parse SOP at ${sopPath}.`);
@@ -752,7 +841,7 @@ export function sopResearchToolAlternativesTool(deps: {
       });
 
       const scheduleCron = args.schedule_cron || "0 9 * * 1";
-      fs.mkdirSync(configDir, { recursive: true });
+      mkdirSync(configDir, { recursive: true });
 
       if (action === "run_now") {
         const researchConfig = {
@@ -771,7 +860,7 @@ export function sopResearchToolAlternativesTool(deps: {
           scheduled: false,
           last_triggered_at: new Date().toISOString(),
         };
-        fs.writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
+        writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
 
         return okResult(
           `Ready to execute immediate 3 - Tier Deep Research for SOP "${args.sop_title}"(${ args.target_department })[Discovery Mode: ${ plan.mode === "tools" ? "Required Tools + Human Checkpoints" : "Step-Level Capability Discovery (0 initial tools)" }].\n` +
@@ -823,7 +912,7 @@ export function sopResearchToolAlternativesTool(deps: {
       jobId,
       created_at: new Date().toISOString(),
     };
-    fs.writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
+    writeFileSync(configPath, JSON.stringify(researchConfig, null, 2));
 
     const discoverySummary =
       plan.mode === "tools"
@@ -1232,8 +1321,6 @@ export function sopProactiveNudgeTool(deps: {
         edited?: boolean;
         cron?: string;
       };
-      const fs = require("node:fs");
-
       if (a.action === "enable_schedule") {
         const cron = a.cron || "0 9 * * *";
         const entry = scheduler.create({
@@ -1288,10 +1375,10 @@ export function sopProactiveNudgeTool(deps: {
           return errResult("sop_title and target_department are required.");
         }
         const sopPath = resolveSOPPath(stateDir, a.target_department, a.sop_title);
-        if (!fs.existsSync(sopPath)) {
+        if (!existsSync(sopPath)) {
           return errResult(`SOP not found at ${sopPath}.`);
         }
-        const markdown = fs.readFileSync(sopPath, "utf8");
+        const markdown = readFileSync(sopPath, "utf8");
         const doc = parseSOP(markdown);
         if (!doc) {
           return errResult(`Failed to parse SOP at ${sopPath}.`);
@@ -1337,7 +1424,7 @@ export function sopProactiveNudgeTool(deps: {
 
         for (const relPath of sops) {
           const fullPath = stateDir.path("Company-brain", "SOPs", relPath);
-          const content = fs.readFileSync(fullPath, "utf8");
+          const content = readFileSync(fullPath, "utf8");
           const doc = parseSOP(content);
           if (!doc) continue;
 

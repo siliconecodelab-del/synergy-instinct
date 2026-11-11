@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { appendTelemetry } from "./telemetry-export.js";
 import { Agent, type AgentMessage, type AgentTool, type BeforeToolCallResult, type StreamFn } from "@earendil-works/pi-agent-core";
 import { createInitialSystemMessage, toToolDeclaration, type ImageContent, type Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
@@ -803,6 +804,24 @@ export class AgentRuntime {
     const preview = contentPreview(content);
     if (preview) detail.result = preview;
     audit.append({ kind: "tool_call", conversationKey: conv.key, principal: conv.principal.id, detail });
+    // Export to telemetry JSONL for DsPy evaluation pipeline (best-effort, never blocks).
+    try {
+      appendTelemetry(this.deps.state, {
+        timestamp: new Date().toISOString(),
+        conversationKey: conv.key,
+        principal: conv.principal.id,
+        tier: conv.principal.tier,
+        channel: conv.channel,
+        tool: toolName,
+        outcome: isError ? "error" : "allow",
+        input: (args && typeof args === "object" ? args as Record<string, unknown> : null),
+        responsePreview: preview ? String(preview).slice(0, 200) : null,
+        durationMs: null,
+        error: isError ? String(content).slice(0, 200) : null,
+      });
+    } catch {
+      // Telemetry export is best-effort
+    }
     if (toolName === REPLY_TOOL && !isError) conv.repliedViaTool = true;
     if (isError || meta?.recordsOwnSpend) return;
     const amountUsd = meta?.amountUsd?.(args);

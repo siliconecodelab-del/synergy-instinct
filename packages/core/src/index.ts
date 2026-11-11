@@ -20,3 +20,4 @@ export * from "./core-tools.js";
 export * from "./net-guard.js";
 export * from "./notifier.js";
 export * from "./pdf.js";
+export * from "./telemetry-export.js";

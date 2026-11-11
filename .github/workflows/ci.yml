@@ -26,6 +26,13 @@ jobs:
       - run: pnpm -r typecheck
       - run: pnpm -r test
       - run: pnpm smoke
+      - name: No CommonJS require() in ESM source
+        run: |
+          if grep -rn "require(" packages --include="*.ts" | grep -v "node_modules" | grep -v "dist/" | grep -v "test/" | grep "node:" ; then
+            echo "ERROR: Found require() calls in ESM source files"
+            exit 1
+          fi
+          echo "OK: No require() calls in ESM source"
       - name: No leftover secrets or personal identifiers
         run: |
           ! grep -rIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git -E "ApiKey_[0-9a-f]{8}-[0-9a-f]{4}|sk-ant-[A-Za-z0-9_-]{20,}|mk_[A-Za-z0-9_-]{30,}|liwl(token|refresh)_" . | grep -vE "test/|\.gitleaks\.toml"

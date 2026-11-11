@@ -156,3 +156,69 @@ describe("resolvePrincipal caps on unauthenticated channels", () => {
     }
   });
 });
+
+describe("normalizePhone — country code preservation (regression: SA +27)", () => {
+  it("preserves country code for 11-digit SA numbers", () => {
+    expect(normalizePhone("+27677489778")).toBe("+27677489778");
+    expect(normalizePhone("27677489778")).toBe("+27677489778");
+  });
+
+  it("does NOT collapse 8-digit to 11-digit (was the bug)", () => {
+    // +677489778 (8 digits) ≠ +27677489778 (11 digits) — these are DIFFERENT numbers
+    expect(normalizePhone("+677489778")).toBe("+677489778");
+    expect(normalizePhone("+677489778")).not.toBe(normalizePhone("+27677489778"));
+  });
+
+  it("strips spaces, dashes, dots, and parentheses", () => {
+    expect(normalizePhone("+27 67 748-9778")).toBe("+27677489778");
+    expect(normalizePhone("+27.67.748.9778")).toBe("+27677489778");
+    expect(normalizePhone("(27) 677-489-778")).toBe("+27677489778");
+  });
+
+  it("handles US 10-digit numbers (assumes +1)", () => {
+    expect(normalizePhone("6175550100")).toBe("+16175550100");
+    expect(normalizePhone("(617) 555-0100")).toBe("+16175550100");
+  });
+
+  it("handles empty and non-numeric input", () => {
+    expect(normalizePhone("")).toBe("");
+    expect(normalizePhone("abc")).toBe("");
+    expect(normalizePhone(null as any)).toBe("");
+  });
+});
+
+describe("resolvePrincipal — iMessage owner recognition (regression)", () => {
+  it("recognises owner by iMessage phone with country code", () => {
+    const config = testConfig({ phones: ["+27677489778"] });
+    const c = new ContactStore(tempState());
+    const p = resolvePrincipal(inbound({ channel: "imessage", from: "+27677489778" }), config, c);
+    expect(p.kind).toBe("owner");
+    expect(p.tier).toBe("owner");
+    expect(p.id).toBe("owner");
+  });
+
+  it("does NOT recognise owner when phone is missing country code", () => {
+    const config = testConfig({ phones: ["+27677489778"] });
+    const c = new ContactStore(tempState());
+    const p = resolvePrincipal(inbound({ channel: "imessage", from: "+677489778" }), config, c);
+    expect(p.kind).toBe("stranger");
+    expect(p.tier).toBe("stranger");
+  });
+
+  it("recognises owner by iMessage phone in various formats", () => {
+    const config = testConfig({ phones: ["+27677489778"] });
+    const c = new ContactStore(tempState());
+    for (const from of ["+27677489778", "+27 67 748 9778", "27677489778"]) {
+      const p = resolvePrincipal(inbound({ channel: "imessage", from }), config, c);
+      expect(p.kind, from).toBe("owner");
+    }
+  });
+
+  it("treats unknown phone as stranger", () => {
+    const config = testConfig({ phones: ["+27677489778"] });
+    const c = new ContactStore(tempState());
+    const p = resolvePrincipal(inbound({ channel: "imessage", from: "+15559998888" }), config, c);
+    expect(p.kind).toBe("stranger");
+    expect(p.tier).toBe("stranger");
+  });
+});

@@ -5,8 +5,12 @@ FROM node:22-slim AS base
 ARG CACHEBUST=1
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
+# ffmpeg assembles SOP Role Map GIF/MP4s (sop_visualize_role_map); chromium
+# captures the per-step frames that ffmpeg stitches. Both are required for the
+# default `gif` format to work in prod; without them the tool degrades to
+# pdf/web only with a warning.
 RUN echo "cachebust=$CACHEBUST" && apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && apt-get install -y --no-install-recommends ca-certificates curl git ffmpeg chromium fonts-liberation \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 WORKDIR /app

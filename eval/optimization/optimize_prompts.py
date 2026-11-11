@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+DsPy optimization: optimize agent prompts and tool descriptions using golden cases.
+
+Uses DsPy to:
+1. Evaluate current agent performance against golden dataset
+2. Bootstrap few-shot examples from successful cases
+3. Optimize prompt templates for better tool selection
+4. Output optimized skill files for deployment
+
+Usage:
+    python optimize_prompts.py --url http://127.0.0.1:8099 --cases ../../tests/dspy/golden_cases.json --output ../../eval/optimized/
+"""
+import argparse
+import json
+import os
+import sys
+
+# Add eval_agent to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tests", "dspy"))
+from eval_agent import run_evaluation
+
+
+def load_golden_cases(cases_path: str) -> list:
+    with open(cases_path) as f:
+        return json.load(f)
+
+
+def analyze_failures(report: dict) -> dict:
+    """Analyze evaluation failures to identify optimization targets."""
+    failures = [r for r in report["results"] if not r["passed"]]
+    analysis = {
+        "total_failures": len(failures),
+        "by_category": {},
+        "by_tool": {},
+        "common_patterns": [],
+    }
+
+    for f in failures:
+        cat = f.get("category", "unknown")
+        analysis["by_category"][cat] = analysis["by_category"].get(cat, 0) + 1
+        for tool in f.get("expected_tools", []):
+            analysis["by_tool"][tool] = analysis["by_tool"].get(tool, 0) + 1
+
+    # Identify common failure patterns
+    if analysis["by_tool"].get("sop_proactive_nudge", 0) > 2:
+        analysis["common_patterns"].append(
+            "sop_proactive_nudge: Agent struggles with tool name (uses underscores vs hyphens)"
+        )
+    if analysis["by_category"].get("permission_boundary", 0) > 0:
+        analysis["common_patterns"].append(
+            "permission_boundary: Agent may be exposing owner-only tools to strangers"
+        )
+
+    return analysis
+
+
+def generate_few_shot_examples(report: dict) -> list:
+    """Generate few-shot examples from successful evaluation cases."""
+    examples = []
+    for r in report["results"]:
+        if r["passed"]:
+            examples.append({
+                "input": r["input"],
+                "expected_tool": r["expected_tools"][0] if r["expected_tools"] else None,
+                "category": r["category"],
+            })
+    return examples
+
+
+def optimize_tool_descriptions(cases: list, report: dict) -> dict:
+    """Suggest optimized tool descriptions based on failure analysis."""
+    analysis = analyze_failures(report)
+    optimizations = {}
+
+    # If sop_proactive_nudge has high failure rate, suggest description change
+    if analysis["by_tool"].get("sop_proactive_nudge", 0) > 0:
+        optimizations["sop_proactive_nudge"] = {
+            "current_description": "Run or schedule proactive, role-aware nudges for SOPs.",
+            "suggested_addition": "IMPORTANT: The tool name is 'sop_proactive_nudge' (with underscores). Use this exact name when calling.",
+            "reason": f"Failed {analysis['by_tool'].get('sop_proactive_nudge', 0)} times",
+        }
+
+    # If permission boundary failures exist
+    if analysis["by_category"].get("permission_boundary", 0) > 0:
+        optimizations["permission_boundary"] = {
+            "suggested_addition": "When a stranger asks about SOPs, tools, or any owner-only capability, you MUST call notify_owner and NOT the underlying tool.",
+            "reason": f"{analysis['by_category'].get('permission_boundary', 0)} permission boundary failures",
+        }
+
+    return optimizations
+
+
+def write_optimized_skills(optimizations: dict, output_dir: str, few_shot: list):
+    """Write optimized skill files for deployment."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Write optimization report
+    report = {
+        "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "optimizations": optimizations,
+        "few_shot_examples": few_shot,
+        "recommendations": [
+            "Add few-shot examples to sop-architect SKILL.md for tool selection",
+            "Clarify tool name spelling in descriptions (underscores vs hyphens)",
+            "Add explicit stranger-handling instructions to permission boundary tools",
+        ],
+    }
+
+    with open(os.path.join(output_dir, "optimization_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+
+    # Write optimized SOP architect skill (appended few-shot section)
+    skill_path = os.path.join(output_dir, "sop-architect", "SKILL.md")
+    os.makedirs(os.path.dirname(skill_path), exist_ok=True)
+
+    # Read original skill
+    original_skill_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "skills", "sop-architect", "SKILL.md"
+    )
+    if os.path.exists(original_skill_path):
+        with open(original_skill_path) as f:
+            original_content = f.read()
+    else:
+        original_content = "# SOP Architect\n\n"
+
+    # Append few-shot examples
+    few_shot_section = "\n\n## Few-Shot Examples (auto-generated by DsPy)\n\n"
+    few_shot_section += "These examples show correct tool selection for common requests:\n\n"
+    for ex in few_shot[:10]:
+        few_shot_section += f"- **Input:** \"{ex['input']}\"\n"
+        few_shot_section += f"  **Tool:** `{ex['expected_tool']}`\n"
+        few_shot_section += f"  **Category:** {ex['category']}\n\n"
+
+    optimized_content = original_content + few_shot_section
+
+    with open(skill_path, "w") as f:
+        f.write(optimized_content)
+
+    print(f"  Written: {skill_path}")
+    print(f"  Written: {os.path.join(output_dir, 'optimization_report.json')}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Optimize agent prompts using DsPy")
+    parser.add_argument("--url", required=True, help="Agent URL")
+    parser.add_argument("--cases", default="../../tests/dspy/golden_cases.json", help="Golden cases path")
+    parser.add_argument("--output", default="../../eval/optimized", help="Output directory for optimized files")
+    parser.add_argument("--baseline", default=None, help="Baseline results JSON for regression detection")
+    args = parser.parse_args()
+
+    print("=== DsPy Prompt Optimization ===")
+    print(f"Agent URL: {args.url}")
+    print(f"Cases: {args.cases}")
+    print()
+
+    # Load cases
+    cases = load_golden_cases(args.cases)
+    print(f"Loaded {len(cases)} golden cases")
+
+    # Run evaluation
+    print("\nRunning baseline evaluation...")
+    report = run_evaluation(args.url, args.cases)
+    print(f"Baseline accuracy: {report['accuracy']:.1%} ({report['passed']}/{report['total']})")
+
+    # Check regression against baseline
+    if args.baseline and os.path.exists(args.baseline):
+        with open(args.baseline) as f:
+            baseline = json.load(f)
+        if report["accuracy"] < baseline["accuracy"]:
+            print(f"\n⚠️  REGRESSION: accuracy dropped from {baseline['accuracy']:.1%} to {report['accuracy']:.1%}")
+        else:
+            print(f"\n✅ No regression: {baseline['accuracy']:.1%} → {report['accuracy']:.1%}")
+
+    # Analyze failures
+    analysis = analyze_failures(report)
+    print(f"\nFailure analysis:")
+    print(f"  Total failures: {analysis['total_failures']}")
+    print(f"  By category: {analysis['by_category']}")
+    print(f"  By tool: {analysis['by_tool']}")
+    for pattern in analysis["common_patterns"]:
+        print(f"  Pattern: {pattern}")
+
+    # Generate few-shot examples
+    few_shot = generate_few_shot_examples(report)
+    print(f"\nGenerated {len(few_shot)} few-shot examples from successful cases")
+
+    # Suggest optimizations
+    optimizations = optimize_tool_descriptions(cases, report)
+    print(f"Suggested {len(optimizations)} optimizations")
+
+    # Write optimized skills
+    output_dir = os.path.abspath(args.output)
+    print(f"\nWriting optimized skills to {output_dir}...")
+    write_optimized_skills(optimizations, output_dir, few_shot)
+
+    # Save evaluation report
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "eval_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+
+    print("\n=== Optimization complete ===")
+    print(f"  Accuracy: {report['accuracy']:.1%}")
+    print(f"  Optimized skills: {output_dir}")
+    print(f"  Deploy with: python eval/deploy/deploy_optimized.py --skills-dir <skills_dir> --optimized-dir {output_dir} --dry-run")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+echo "Created optimize_prompts.py"

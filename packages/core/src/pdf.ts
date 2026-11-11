@@ -305,10 +305,17 @@ function renderBlock(doc: PDFKit.PDFDocument, block: Block, opts: PdfOptions = {
         return;
       }
       const width = contentWidth(doc);
-      if (doc.y > doc.page.height - doc.page.margins.bottom - Math.min(IMAGE_MAX_HEIGHT, width)) doc.addPage();
       try {
-        doc.image(file, doc.page.margins.left, doc.y, { fit: [width, IMAGE_MAX_HEIGHT], align: "center" });
-        doc.y = Math.min(doc.y + IMAGE_MAX_HEIGHT, doc.page.height - doc.page.margins.bottom);
+        // pdfkit's `openImage` is a public method at runtime (missing from @types):
+        // use the real fitted size so the cursor advances by what the image occupies
+        // instead of the full 440px reserve, which pushed short images onto page 2.
+        const img = (doc as PDFKit.PDFDocument & { openImage(src: string): { width: number; height: number } }).openImage(file);
+        const scale = Math.min(width / img.width, IMAGE_MAX_HEIGHT / img.height);
+        const drawWidth = img.width * scale;
+        const drawHeight = img.height * scale;
+        if (doc.y > doc.page.height - doc.page.margins.bottom - drawHeight) doc.addPage();
+        doc.image(file, doc.page.margins.left + (width - drawWidth) / 2, doc.y, { width: drawWidth });
+        doc.y = Math.min(doc.y + drawHeight, doc.page.height - doc.page.margins.bottom);
         doc.moveDown(0.3);
       } catch {
         doc.font("Helvetica-Oblique").fontSize(BODY_SIZE).fillColor("#666666");

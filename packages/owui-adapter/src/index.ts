@@ -17,7 +17,8 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { MaritimeClient } from "./maritime.js";
+import { createAgentClientFromEnv } from "./maritime.js";
+import type { AgentClient } from "./maritime.js";
 import {
   type OpenAIChatRequest,
   type OpenAIChatResponse,
@@ -30,24 +31,20 @@ import {
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const ADAPTER_TOKEN = process.env.ADAPTER_TOKEN || "";
-const MARITIME_API_URL = process.env.MARITIME_API_URL || "https://api.maritime.sh";
-const MARITIME_API_KEY = process.env.MARITIME_API_KEY || "";
+const MODEL_ID = process.env.MODEL_ID || "instinct-agent-local";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
-// Cache of MaritimeClient instances by external ID
-const clientCache = new Map<string, MaritimeClient>();
+// Cache of agent client instances by external ID (local mode) or maritime agent id (prod mode)
+const clientCache = new Map<string, AgentClient>();
 
-function getMaritimeClient(externalId: string): MaritimeClient {
-  let client = clientCache.get(externalId);
+function getAgentClient(externalId: string): AgentClient {
+  // In local mode, the client is the same for all externalIds (single local agent)
+  const cacheKey = process.env.AGENT_CHAT_URL ? "local" : externalId;
+  let client = clientCache.get(cacheKey);
   if (!client) {
-    client = new MaritimeClient({
-      baseUrl: MARITIME_API_URL,
-      apiKey: MARITIME_API_KEY,
-      agentId: "",
-      externalId,
-    });
-    clientCache.set(externalId, client);
+    client = createAgentClientFromEnv();
+    clientCache.set(cacheKey, client);
   }
   return client;
 }
@@ -202,10 +199,10 @@ async function handleChatCompletions(req: http.IncomingMessage, res: http.Server
     });
   }
 
-  const maritimeClient = getMaritimeClient(externalId);
+  const agentClient = getAgentClient(externalId);
 
   try {
-    const agentResp = await maritimeClient.chat(
+    const agentResp = await agentClient.chat(
       instinctReq.message,
       instinctReq.conversation_id || externalId,
       instinctReq.source || "open-webui",
@@ -260,7 +257,19 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
     owned_by: string;
   }> = [];
 
-  // Query Supabase for all ready adapter rows
+  // In local mode (AGENT_CHAT_URL set), return the single configured model
+  if (process.env.AGENT_CHAT_URL) {
+    data.push({
+      id: MODEL_ID,
+      object: "model",
+      created: now,
+      owned_by: "instinct-agent",
+    });
+    sendJson(res, 200, { object: "list", data });
+    return;
+  }
+
+  // In production mode, query Supabase for all ready adapter rows
   if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
     try {
       const url = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id&status=eq.ready`;
@@ -291,7 +300,11 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
 }
 
 async function handleHealth(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  sendJson(res, 200, { status: "ok", adapters: clientCache.size, supabase: Boolean(SUPABASE_URL) });
+  sendJson(res, 200, {
+    status: "ok",
+    mode: process.env.AGENT_CHAT_URL ? "local" : "maritime",
+    supabase: Boolean(SUPABASE_URL),
+  });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -327,8 +340,13 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[adapter] OpenAI-compatible adapter listening on :${PORT}`);
-  console.log(`[adapter] Multi-tenant: models queried from Supabase`);
-  console.log(`[adapter] Supabase URL: ${SUPABASE_URL || "(not set)"}`);
+  if (process.env.AGENT_CHAT_URL) {
+    console.log(`[adapter] Local mode: calling agent at ${process.env.AGENT_CHAT_URL}`);
+    console.log(`[adapter] Model ID: ${MODEL_ID}`);
+  } else {
+    console.log(`[adapter] Multi-tenant: models queried from Supabase`);
+    console.log(`[adapter] Supabase URL: ${SUPABASE_URL || "(not set)"}`);
+  }
 });
 
 export { server };

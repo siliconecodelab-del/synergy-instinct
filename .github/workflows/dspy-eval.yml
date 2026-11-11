@@ -1,0 +1,74 @@
+name: dspy-nightly-eval
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 2 AM UTC daily
+  workflow_dispatch:  # manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  dspy-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: Install Chrome and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y chromium-browser ffmpeg fonts-liberation
+
+      - name: Start agent server
+        run: |
+          export INSTINCT_DATA_DIR=/tmp/instinct-eval
+          mkdir -p /tmp/instinct-eval
+          export INSTINCT_OWNER_NAME="Eval Owner"
+          export INSTINCT_OWNER_PHONE="+15550001111"
+          export INSTINCT_OWNER_EMAIL="eval@example.com"
+          export INSTINCT_AGENT_NAME="EvalAgent"
+          export INSTINCT_MODEL="openai-compatible/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+          export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+          export OPENAI_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+          export INSTINCT_AGENTRUN=1
+          export INSTINCT_SKILLS_DIR="$GITHUB_WORKSPACE/skills"
+          export INSTINCT_COMPUTER="none"
+          node packages/cli/dist/bin.js dev --port 8099 &
+          sleep 15
+          curl -s http://127.0.0.1:8099/health
+
+      - name: Run DsPy evaluation
+        run: |
+          python tests/dspy/eval_agent.py \
+            --url http://127.0.0.1:8099 \
+            --cases tests/dspy/golden_cases.json \
+            --output /tmp/eval-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dspy-eval-results
+          path: /tmp/eval-results.json
+
+      - name: Check accuracy threshold
+        run: |
+          python -c "
+          import json
+          with open('/tmp/eval-results.json') as f:
+              r = json.load(f)
+          print(f'Accuracy: {r[\"accuracy\"]:.1%} ({r[\"passed\"]}/{r[\"total\"]})')
+          if r['accuracy'] < 0.8:
+              print('FAIL: Below 80% threshold')
+              exit(1)
+          "

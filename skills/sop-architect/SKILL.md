@@ -1,6 +1,6 @@
 ---
 name: sop-architect
-description: Design, scaffold, validate, and deploy Standard Operating Procedures (SOPs) into the company brain repository, and map out where the human fits vs. where the agent fits within each SOP. Use when a recurring process needs documentation, when the user requests a new SOP, or when running proactive SOP routines/nudges. Invokes generate_dynamic_sop, sop_check_required_tools, sopResearchToolAlternatives, and sop_proactive_nudge.
+description: Design, scaffold, validate, and deploy Standard Operating Procedures (SOPs) into the company brain repository, and map out where the human fits vs. where the agent fits within each SOP — as text and as a delivered visual Role Map (animated GIF, interactive web link, one-page PDF). Use when a recurring process needs documentation, when the user requests a new SOP, or when running proactive SOP routines/nudges. Invokes generate_dynamic_sop, sop_check_required_tools, sop_visualize_role_map, sopResearchToolAlternatives, and sop_proactive_nudge.
 ---
 
 # SOP Architect
@@ -17,6 +17,7 @@ Use this skill when:
 - The user requests a new SOP ("create an SOP for X", "document how we do Y")
 - An existing SOP needs updating, versioning, or graduating from `Hybrid` to `Fully_Automated`
 - A process needs to be classified by execution type (`Manual` / `Hybrid` / `Fully_Automated`) so the owner knows where they fit in the execution flow
+- The owner asks for a visual of an SOP ("show me the map", "send the role map") or an SOP was just created/graduated and its visual Role Map is due
 - You need to verify which tools an SOP requires are connected via Composio
 - You are setting up or running proactive SOP nudges (`sop_proactive_nudge`) or routine tool-alternative research (`sopResearchToolAlternatives`)
 
@@ -30,7 +31,7 @@ Every SOP must treat `execution_classification` (`Manual` | `Hybrid` | `Fully_Au
 | **Hybrid** | **Agent = Draftsman / Clerk.**<br>**Human = Editor / Taste Gatekeeper.**<br>Agent handles the 0-to-80% mechanical prep; human steps in only at judgment/approval gates. | *"I handle Steps [X, Y] autonomously (gathering data & prepping drafts) and pause to text you at Checkpoint Step [Z] for your review/approval before finishing."* |
 | **Fully_Automated** | **Agent = Full Executor.**<br>**Human = Architect & Exception Handler.**<br>Rules and verification are clear enough for end-to-end execution. | *"Zero manual steps during normal runs — I run Steps 1..N end-to-end and only text you a compact completion summary or if an exception needs your call."* |
 
-Whenever `generate_dynamic_sop` finishes, **always include the Role Map summary (`Summary for Owner`) in your reply** so the human immediately sees their exact scope of involvement in the SOP.
+Whenever `generate_dynamic_sop` finishes, **always include the Role Map summary (`Summary for Owner`) in your reply** so the human immediately sees their exact scope of involvement in the SOP. Then **run `sop_visualize_role_map` for that SOP in the same turn and deliver it** (unless the owner's format default is `off`) — see the tool section below.
 
 ## Tools
 
@@ -53,6 +54,31 @@ Call this tool with the following parameters:
 3. Seeds a `PipelineStore` record with the SOP's `classification` so background compilation and proactive nudges know how to handle it.
 4. Checks `required_tools_or_skills` against Composio and reports connected vs. disconnected tools.
 
+### sop_visualize_role_map
+
+Renders the SOP's Role Map as a **visual artifact** — You / Agent / Tools swimlanes showing every step plus *Where You (Human) Fit vs. Where the Agent Fits* for its execution classification — and returns the workspace paths plus the exact next tool calls to deliver it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `sop_title` | string | Title of an existing SOP |
+| `target_department` | string | Owning department of the SOP |
+| `format` | `"gif"` \| `"mp4"` \| `"pdf"` \| `"web"` \| `"all"` \| `"off"` | What to render. **Omit to use the owner's stored default** (`gif` unless changed). `all` renders web + gif + mp4 + pdf |
+| `set_as_default` | boolean | Also save `format` as the owner's default for future Role Maps (requires `format`; `off` turns off auto-delivery) |
+
+**What it renders:**
+
+1. **gif (default)** — animated walkthrough that steps through the procedure and lights up your checkpoints/handoffs. Stays under iMessage's 10 MB inline limit. Delivered with `send_file`.
+2. **web** — interactive standalone HTML written to `workspace/apps/sop-<slug>/index.html`. Deploy with `ample_deploy {"path": "apps/sop-<slug>"}` and paste the returned URL.
+3. **pdf** — one-page playbook (map image + steps table + Role Map text) at `workspace/sop-maps/<slug>.pdf`. Delivered with `send_file`.
+
+**When to run it:**
+
+- Right after `generate_dynamic_sop` succeeds — once the SOP exists, never during creation (keep SOP creation fast).
+- Right after `sop_proactive_nudge` `graduate` — graduating `Hybrid` → `Fully_Automated` moves the lanes, so the map must be refreshed and re-sent.
+- Whenever the owner asks to see, show, or send an SOP's map.
+
+**Deliver in the same turn:** the tool output ends with `Next tool calls (deliver now, in this same turn)` — follow them in order: `send_file` the default artifact with its caption, run `ample_deploy` and share the returned URL as the interactive link, and mention any offered extra (e.g. the PDF) in the same message. If the tool returns `Notes` about a missing renderer, send what was produced and tell the owner plainly which format was skipped — never block or fail the SOP itself over a visual.
+
 ### sop_proactive_nudge
 
 Proactive, role-aware routines and nudges for SOPs (gated by `nudge_gate` quiet hours 22:00–07:00 and 1/day deduplication):
@@ -62,7 +88,7 @@ Proactive, role-aware routines and nudges for SOPs (gated by `nudge_gate` quiet 
 | `scan` | — | Scans all SOPs in `/data/Company-brain/SOPs` for: (1) disconnected Composio tools blocking an SOP, (2) `Hybrid` SOPs with 5+ consecutive unedited checkpoint approvals ready to graduate to `Fully_Automated`, and (3) newly documented SOPs not yet active/scheduled. Returns a role-aware nudge message tailored to `Manual`, `Hybrid`, or `Fully_Automated`. |
 | `enable_schedule` | `cron` (optional, default `"0 9 * * *"`) | Registers a daily 09:00 `Scheduler` job (`sop-proactive-nudge-daily`) that runs `scan` and nudges the owner at most once per day. |
 | `record_checkpoint_approval` | `sop_title`, `target_department`, `edited` (boolean) | Records when the owner approves a `Hybrid` checkpoint. If `edited: false` 5 times in a row, surfaces a **Graduation Nudge**: *"You've approved the checkpoint in '<title>' 5 times in a row without edits. Want to take yourself out of the loop and graduate this SOP from Hybrid to Fully Automated? (yes/no)"* |
-| `graduate` | `sop_title`, `target_department` | Upgrades a `Hybrid` SOP to `Fully_Automated` on disk and in `PipelineStore`, updating its Role Map so the agent runs all steps end-to-end. |
+| `graduate` | `sop_title`, `target_department` | Upgrades a `Hybrid` SOP to `Fully_Automated` on disk and in `PipelineStore`, updating its Role Map so the agent runs all steps end-to-end. **After graduating, run `sop_visualize_role_map` and deliver the refreshed map.** |
 
 ### sop_check_required_tools
 
