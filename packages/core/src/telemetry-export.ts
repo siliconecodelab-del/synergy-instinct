@@ -16,6 +16,8 @@ import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync } from
 import { join } from "node:path";
 import type { StateDir } from "./state.js";
 
+export type ExecutionMode = "sop" | "icm" | "workflow_dsl" | null;
+
 export interface TelemetryEntry {
   timestamp: string;
   conversationKey: string;
@@ -28,6 +30,10 @@ export interface TelemetryEntry {
   responsePreview: string | null;
   durationMs: number | null;
   error: string | null;
+  /** Which execution mode was used for this tool call (null if not applicable). */
+  executionMode: ExecutionMode;
+  /** Task type classification for execution-mode comparison (e.g. "lead-follow-up", "weekly-reconcile"). */
+  taskType: string | null;
 }
 
 export interface TelemetryExportOptions {
@@ -76,6 +82,81 @@ export function readTelemetry(state: StateDir, date?: string): TelemetryEntry[] 
     }
   }
   return entries;
+}
+
+
+
+export interface ExecutionModeComparison {
+  taskType: string;
+  modes: Record<string, {
+    executions: number;
+    successRate: number;
+    avgDurationMs: number;
+    errorRate: number;
+    humanEditRate: number;
+  }>;
+  recommendedMode: string | null;
+  confidence: number;
+}
+
+export function compareExecutionModes(state: StateDir, since?: string): ExecutionModeComparison[] {
+  const entries = readTelemetry(state);
+  const filtered = since ? entries.filter((e) => e.timestamp >= since) : entries;
+
+  // Group by task type, then by execution mode
+  const byTask: Record<string, Record<string, TelemetryEntry[]>> = {};
+  for (const e of filtered) {
+    if (!e.taskType || !e.executionMode) continue;
+    if (!byTask[e.taskType]) byTask[e.taskType] = {};
+    if (!byTask[e.taskType]![e.executionMode]) byTask[e.taskType]![e.executionMode] = [];
+    byTask[e.taskType]![e.executionMode]!.push(e);
+  }
+
+  const comparisons: ExecutionModeComparison[] = [];
+  for (const [taskType, modes] of Object.entries(byTask)) {
+    const modeStats: Record<string, { executions: number; successRate: number; avgDurationMs: number; errorRate: number; humanEditRate: number }> = {};
+
+    for (const [mode, entries] of Object.entries(modes)) {
+      const total = entries.length;
+      const successes = entries.filter((e) => e.outcome === "allow").length;
+      const errors = entries.filter((e) => e.outcome === "error").length;
+      const durations = entries.map((e) => e.durationMs).filter((d): d is number => d !== null);
+      const avgDuration = durations.length > 0 ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
+
+      modeStats[mode] = {
+        executions: total,
+        successRate: total > 0 ? successes / total : 0,
+        avgDurationMs: avgDuration,
+        errorRate: total > 0 ? errors / total : 0,
+        humanEditRate: 0, // Enriched from approvals data
+      };
+    }
+
+    // Recommend the mode with highest success rate, then lowest error rate, then lowest duration
+    let recommended: string | null = null;
+    let bestScore = -1;
+    let confidence = 0;
+
+    for (const [mode, stats] of Object.entries(modeStats)) {
+      if (stats.executions < 3) continue; // Need at least 3 executions
+      const score = stats.successRate * 0.5 + (1 - stats.errorRate) * 0.3 + (stats.avgDurationMs > 0 ? 1 / (stats.avgDurationMs + 1) : 0) * 0.2;
+      if (score > bestScore) {
+        bestScore = score;
+        recommended = mode;
+        // Confidence based on number of executions and consistency
+        confidence = Math.min(0.95, 0.5 + (stats.executions / 20) * 0.3 + (stats.successRate - 0.5) * 0.2);
+      }
+    }
+
+    comparisons.push({
+      taskType,
+      modes: modeStats,
+      recommendedMode: recommended,
+      confidence,
+    });
+  }
+
+  return comparisons;
 }
 
 export function exportTelemetrySummary(state: StateDir, since?: string): {

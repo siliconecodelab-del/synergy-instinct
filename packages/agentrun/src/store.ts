@@ -6,7 +6,7 @@
  * library: the agent can save drafts it authors and load them later to run.
  */
 import { StateDir } from "@open-instinct/core";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 
 export class WorkflowStore {
@@ -59,7 +59,7 @@ export class WorkflowStore {
     const file = join(this.dir(), `${name}.json`);
     if (!existsSync(file)) return false;
     try {
-      require("node:fs").unlinkSync(file);
+      unlinkSync(file);
       return true;
     } catch {
       return false;

@@ -21,3 +21,7 @@ export * from "./net-guard.js";
 export * from "./notifier.js";
 export * from "./pdf.js";
 export * from "./telemetry-export.js";
+export * from "./platform-approvals.js";
+export * from "./platform-notifier.js";
+export * from "./platform-override-store.js";
+export * from "./platform-override-manager.js";

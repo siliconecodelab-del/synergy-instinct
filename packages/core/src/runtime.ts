@@ -797,6 +797,35 @@ export class AgentRuntime {
     };
   }
 
+
+  /** Infer execution mode from tool name and arguments. */
+  private inferExecutionMode(toolName: string, args: unknown): "sop" | "icm" | "workflow_dsl" | null {
+    const a = args && typeof args === "object" ? args as Record<string, unknown> : {};
+    // ICM workspace conversion
+    if (toolName === "icm_to_dsl" || toolName === "workflow_trace") return "icm";
+    // AgentRun DSL workflow execution
+    if (toolName === "agentrun" && (a.action === "run" || a.action === "dry-run")) return "workflow_dsl";
+    // SOP-related tools
+    if (toolName.startsWith("sop_") || toolName === "generate_dynamic_sop") return "sop";
+    return null;
+  }
+
+  /** Infer task type from tool name and arguments for execution-mode comparison. */
+  private inferTaskType(toolName: string, args: unknown): string | null {
+    const a = args && typeof args === "object" ? args as Record<string, unknown> : {};
+    // SOP tools: use sop_title as task type
+    if (a.sop_title && typeof a.sop_title === "string") return a.sop_title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    if (a.sopTitle && typeof a.sopTitle === "string") return a.sopTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    // ICM: use icmRoot basename
+    if (a.icmRoot && typeof a.icmRoot === "string") {
+      const parts = (a.icmRoot as string).split("/");
+      return parts[parts.length - 1]?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ?? null;
+    }
+    // Workflow: use workflow name
+    if (a.name && typeof a.name === "string" && toolName === "agentrun") return a.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return null;
+  }
+
   private recordToolCall(conv: Conversation, toolName: string, args: unknown, isError: boolean, content: unknown): void {
     const { registry, audit } = this.deps;
     const meta = registry.meta(toolName);
@@ -818,6 +847,8 @@ export class AgentRuntime {
         responsePreview: preview ? String(preview).slice(0, 200) : null,
         durationMs: null,
         error: isError ? String(content).slice(0, 200) : null,
+        executionMode: this.inferExecutionMode(toolName, args),
+        taskType: this.inferTaskType(toolName, args),
       });
     } catch {
       // Telemetry export is best-effort

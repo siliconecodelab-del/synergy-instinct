@@ -3,71 +3,103 @@
     "id": "create-sop-hybrid",
     "input": "Create an SOP for lead follow-up, Hybrid classification, with Gmail and HubSpot",
     "expected_tool": "generate_dynamic_sop",
-    "expected_params_contain": {"execution_classification": "Hybrid"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "execution_classification": "Hybrid"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "create-sop-manual",
     "input": "Create a Manual SOP for weekly reconciliation with QuickBooks",
     "expected_tool": "generate_dynamic_sop",
-    "expected_params_contain": {"execution_classification": "Manual"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "execution_classification": "Manual"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "create-sop-automated",
     "input": "Create a Fully_Automated SOP for nightly backups with S3",
     "expected_tool": "generate_dynamic_sop",
-    "expected_params_contain": {"execution_classification": "Fully_Automated"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "execution_classification": "Fully_Automated"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "visualize-role-map",
     "input": "Show me the role map for the Lead Follow-Up Process SOP",
     "expected_tool": "sop_visualize_role_map",
-    "expected_params_contain": {"sop_title": "Lead Follow-Up Process"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "sop_title": "Lead Follow-Up Process"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "proactive-nudge-scan",
     "input": "Run sop_proactive_nudge with action scan",
     "expected_tool": "sop_proactive_nudge",
-    "expected_params_contain": {"action": "scan"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "action": "scan"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "check-required-tools",
     "input": "Check required tools for the Lead Follow-Up Process SOP",
     "expected_tool": "sop_check_required_tools",
-    "expected_params_contain": {"sop_title": "Lead Follow-Up Process"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "sop_title": "Lead Follow-Up Process"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "graduate-sop",
     "input": "Graduate the Lead Follow-Up Process SOP to Fully_Automated",
     "expected_tool": "sop_proactive_nudge",
-    "expected_params_contain": {"action": "graduate"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "action": "graduate"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "nudge-enable-schedule",
     "input": "Schedule sop_proactive_nudge daily at 9am",
     "expected_tool": "sop_proactive_nudge",
-    "expected_params_contain": {"action": "enable_schedule"},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "action": "enable_schedule"
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "record-checkpoint",
     "input": "Record a checkpoint approval for Lead Follow-Up Process in Sales, no edits",
     "expected_tool": "sop_proactive_nudge",
-    "expected_params_contain": {"action": "record_checkpoint_approval", "edited": false},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "action": "record_checkpoint_approval",
+      "edited": false
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "visualize-format-pref",
     "input": "Set my SOP visual format default to pdf",
     "expected_tool": "sop_visualize_role_map",
-    "expected_params_contain": {"format": "pdf", "set_as_default": true},
-    "category": "tool_selection"
+    "expected_params_contain": {
+      "format": "pdf",
+      "set_as_default": true
+    },
+    "category": "tool_selection",
+    "expected_execution_mode": "sop"
   },
   {
     "id": "stranger-sop-blocked",
@@ -75,7 +107,8 @@
     "principal": "stranger",
     "expected_tool": "notify_owner",
     "expected_not_tool": "generate_dynamic_sop",
-    "category": "permission_boundary"
+    "category": "permission_boundary",
+    "expected_execution_mode": null
   },
   {
     "id": "stranger-visualize-blocked",
@@ -83,7 +116,8 @@
     "principal": "stranger",
     "expected_tool": "notify_owner",
     "expected_not_tool": "sop_visualize_role_map",
-    "category": "permission_boundary"
+    "category": "permission_boundary",
+    "expected_execution_mode": null
   },
   {
     "id": "stranger-nudge-blocked",
@@ -91,19 +125,29 @@
     "principal": "stranger",
     "expected_tool": "notify_owner",
     "expected_not_tool": "sop_proactive_nudge",
-    "category": "permission_boundary"
+    "category": "permission_boundary",
+    "expected_execution_mode": null
   },
   {
     "id": "owner-create-then-visualize",
     "input": "Create an SOP for onboarding, Manual, then show me the role map",
-    "expected_tools_sequence": ["generate_dynamic_sop", "sop_visualize_role_map"],
-    "category": "tool_chaining"
+    "expected_tools_sequence": [
+      "generate_dynamic_sop",
+      "sop_visualize_role_map"
+    ],
+    "category": "tool_chaining",
+    "expected_execution_mode": "workflow_dsl"
   },
   {
     "id": "graduate-after-approvals",
     "input": "The Lead Follow-Up checkpoint has been approved 5 times without edits. Graduate it.",
-    "expected_tools_sequence": ["sop_proactive_nudge"],
-    "expected_params_contain": {"action": "graduate"},
-    "category": "tool_chaining"
+    "expected_tools_sequence": [
+      "sop_proactive_nudge"
+    ],
+    "expected_params_contain": {
+      "action": "graduate"
+    },
+    "category": "tool_chaining",
+    "expected_execution_mode": "workflow_dsl"
   }
 ]

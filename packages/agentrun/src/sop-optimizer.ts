@@ -47,7 +47,8 @@ export interface StepMetrics {
 }
 
 export interface OptimizationSignal {
-  target: OptimizationTarget;
+  target: "agent_prompt" | "sop_content" | "execution_mode";
+  capability: string;
   metric: string;
   value: number;
   threshold: number;
@@ -72,7 +73,8 @@ export interface OptimizationProposal {
 
 export interface OptimizationSuggestion {
   type: "rewrite_step" | "remove_step" | "remove_checkpoint" | "graduate" | "fix_tool_mapping" | "rewrite_tool_description" | "connect_tool" | "add_checkpoint";
-  target: OptimizationTarget;
+  target: "agent_prompt" | "sop_content" | "execution_mode";
+  capability: string;
   step?: number;
   current: string;
   suggested: string;
@@ -191,7 +193,8 @@ export function analyzeSOP(
   for (const sm of stepMetrics) {
     if (sm.checkpoint && sm.editRate > THRESHOLDS.STEP_EDIT_RATE) {
       signals.push({
-        target: "SOP_CONTENT",
+        target: "sop_content",
+        capability: "step.edit",
         metric: "step_edit_rate",
         value: sm.editRate,
         threshold: THRESHOLDS.STEP_EDIT_RATE,
@@ -206,7 +209,8 @@ export function analyzeSOP(
   for (const sm of stepMetrics) {
     if (sm.skipRate > THRESHOLDS.STEP_SKIP_RATE && sm.executionCount > 0) {
       signals.push({
-        target: "SOP_CONTENT",
+        target: "sop_content",
+        capability: "step.skip",
         metric: "step_skip_rate",
         value: sm.skipRate,
         threshold: THRESHOLDS.STEP_SKIP_RATE,
@@ -221,7 +225,8 @@ export function analyzeSOP(
   for (const sm of stepMetrics) {
     if (sm.errorRate > THRESHOLDS.TOOL_ERROR_RATE && sm.executionCount >= THRESHOLDS.MIN_EXECUTIONS) {
       signals.push({
-        target: "SOP_CONTENT",
+        target: "sop_content",
+        capability: "tool.error",
         metric: "tool_error_rate",
         value: sm.errorRate,
         threshold: THRESHOLDS.TOOL_ERROR_RATE,
@@ -238,7 +243,8 @@ export function analyzeSOP(
   for (const tool of tools) {
     if (toolStatus[tool] === "not_connected" || toolStatus[tool] === "not_configured") {
       signals.push({
-        target: "SOP_CONTENT",
+        target: "sop_content",
+        capability: "tool.disconnected",
         metric: "tool_disconnected",
         value: 1.0,
         threshold: 0.0,
@@ -255,7 +261,8 @@ export function analyzeSOP(
 
   if (graduationCandidate) {
     signals.push({
-      target: "SOP_CONTENT",
+      target: "sop_content",
+      capability: "graduation",
       metric: "graduation_candidate",
       value: effectiveExecutions,
       threshold: THRESHOLDS.CHECKPOINT_UNEDITED,
@@ -274,7 +281,8 @@ export function analyzeSOP(
       if (sm) {
         suggestions.push({
           type: "rewrite_step",
-          target: "SOP_CONTENT",
+          target: "sop_content",
+          capability: "step.edit",
           step: sm.step,
           current: sm.description,
           suggested: `[Optimized] ${sm.description} (add specific tool parameters, expected output format, and error handling)`,
@@ -290,7 +298,8 @@ export function analyzeSOP(
       if (sm) {
         suggestions.push({
           type: "remove_step",
-          target: "SOP_CONTENT",
+          target: "sop_content",
+          capability: "step.skip",
           step: sm.step,
           current: sm.description,
           suggested: "[Remove this step — it is skipped in most executions]",
@@ -306,7 +315,8 @@ export function analyzeSOP(
       if (sm) {
         suggestions.push({
           type: "fix_tool_mapping",
-          target: "SOP_CONTENT",
+          target: "sop_content",
+          capability: "tool.error",
           step: sm.step,
           current: sm.tools.join(", ") || "none",
           suggested: `[Fix: verify tool connections for ${sm.tools.join(", ") || "none"}]`,
@@ -321,7 +331,8 @@ export function analyzeSOP(
       const tool = signal.description.match(/"([^"]+)"/)?.[1] ?? "";
       suggestions.push({
         type: "connect_tool",
-        target: "SOP_CONTENT",
+        target: "sop_content",
+        capability: "tool.disconnected",
         current: `${tool} (${toolStatus[tool]?.replace(/_/g, " ") ?? "not connected"})`,
         suggested: `Connect ${tool} or find an alternative`,
         confidence: 1.0,
@@ -333,8 +344,9 @@ export function analyzeSOP(
     if (signal.metric === "graduation_candidate") {
       suggestions.push({
         type: "graduate",
-        target: "SOP_CONTENT",
-        current: frontmatter.execution_classification,
+        target: "sop_content",
+          capability: "graduation",
+          current: frontmatter.execution_classification,
         suggested: "Fully_Automated",
         confidence: 0.8,
         reason: signal.description,
@@ -344,8 +356,8 @@ export function analyzeSOP(
   }
 
   // Determine risk level
-  const hasSOPChanges = suggestions.some((s) => s.target === "SOP_CONTENT");
-  const hasPromptChanges = suggestions.some((s) => s.target === "AGENT_PROMPT");
+  const hasSOPChanges = suggestions.some((s) => s.target === "sop_content");
+  const hasPromptChanges = suggestions.some((s) => s.target === "agent_prompt");
   const riskLevel: "low" | "medium" | "high" =
     hasPromptChanges ? "high" : hasSOPChanges ? "medium" : "low";
 

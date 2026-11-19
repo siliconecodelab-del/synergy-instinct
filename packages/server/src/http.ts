@@ -101,7 +101,7 @@ export interface HttpServerOptions {
 
 export const BODY_LIMIT_BYTES = 1024 * 1024;
 export const CHAT_TOKEN_HEADER = "x-instinct-token";
-export const TUNNEL_ROUTES: ReadonlySet<string> = new Set(["GET /health", "POST /webhooks/inkbox", "GET /agent/snapshot"]);
+export const TUNNEL_ROUTES: ReadonlySet<string> = new Set(["GET /health", "POST /webhooks/inkbox", "GET /agent/snapshot", "POST /platform/webhooks/slack"]);
 /** A Maritime schedule wake may arrive a little before the minute boundary we computed. */
 export const SCHEDULE_WAKE_GRACE_MS = 90_000;
 /** Envelope event type the gateway relays when Link redirects to its callback URL. */
@@ -376,6 +376,22 @@ export function createHttpServer(app: HttpApp, opts: HttpServerOptions = {}): ht
       }
       res.statusCode = 204;
       res.end();
+      return;
+    }
+
+    // Platform-team Slack webhook callback (interactive button clicks).
+    if (method === "POST" && path === "/platform/webhooks/slack") {
+      const { handleSlackWebhook } = await import("./platform-webhook.js");
+      const state = app.state;
+      if (!state) return sendJson(res, 503, { error: "state not configured" });
+      const deps = {
+        stateDir: state,
+        slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
+        onResolved: (token: string, action: string, resolvedBy: string) => {
+          log(`platform approval ${token} ${action} by ${resolvedBy}`);
+        },
+      };
+      handleSlackWebhook(req, res, deps);
       return;
     }
 

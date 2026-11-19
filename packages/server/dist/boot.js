@@ -23,7 +23,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, platformApproveTool, platformOverrideTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry } from "@open-instinct/agentrun";
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
 const SKILLS_REFRESH_MS = 30_000;
 export const DEFAULT_MARITIME_MCP_URL = "https://mcp.maritime.sh";
@@ -552,6 +552,8 @@ export async function boot(env, opts = {}) {
         registry.register(sopProactiveNudgeTool({ stateDir: state, composio: apps }));
         registry.register(sopVisualizeRoleMapTool({ stateDir: state }));
         registry.register(sopOptimizeTool({ stateDir: state }));
+        registry.register(platformApproveTool({ stateDir: state, slackWebhookUrl: process.env.SLACK_WEBHOOK_URL }));
+        registry.register(platformOverrideTool({ stateDir: state }));
         registry.register(workflowTraceTool({ stateDir: state }));
         registry.register(pipelineStatusTool({ stateDir: state }));
         registry.register(pipelinePrefsTool({ stateDir: state }));

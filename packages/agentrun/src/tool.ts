@@ -9,6 +9,7 @@ import { Type } from "typebox";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler } from "@open-instinct/core";
+import { createPlatformOverrideManager } from "@open-instinct/core";
 import {
   inspectWorkflow,
   dryRunWorkflow,
@@ -1519,6 +1520,13 @@ export function sopOptimizeTool(deps: {
   stateDir: StateDir;
 }): RegisteredTool {
   const { stateDir } = deps;
+  const overrideManager = createPlatformOverrideManager(stateDir, {
+    pending: () => [],
+    get: () => undefined,
+    create: () => ({} as any),
+    resolve: () => ({} as any),
+    markNotified: () => {},
+  } as any);
 
   return defineTool({
     name: "sop_optimize",
@@ -1632,10 +1640,29 @@ export function sopOptimizeTool(deps: {
           "",
         ];
 
+        // Report any local overrides that deviate from platform defaults
+        const overrides = overrideManager.listOverrides();
+        if (overrides.length > 0) {
+          lines.push("### Local Overrides (override platform defaults):");
+          for (const ov of overrides) {
+            lines.push(`  - Target: ${ov.target} | Capability: ${ov.capability}`);
+            lines.push(`    Reason: ${ov.reason}`);
+            lines.push(`    Overridden value: ${JSON.stringify(ov.overriddenValue)}`);
+          }
+          lines.push("");
+        }
+
         if (proposal.signals.length > 0) {
           lines.push("### Signals detected:");
           for (const sig of proposal.signals) {
-            lines.push(`  - [${sig.target}] ${sig.description} (confidence: ${Math.round(sig.confidence * 100)}%)`);
+            // Check if there's a local override for this signal
+            const localOverride = overrideManager.listOverrides().find(
+              (o) => o.target === sig.target && o.capability === sig.capability
+            );
+            const overrideNote = localOverride
+              ? ` [LOCAL OVERRIDE ACTIVE: ${JSON.stringify(localOverride.overriddenValue)}]`
+              : "";
+            lines.push(`  - [${sig.target}] ${sig.description} (confidence: ${Math.round(sig.confidence * 100)}%)${overrideNote}`);
             lines.push(`    Suggestion: ${sig.suggestion}`);
           }
           lines.push("");
@@ -1645,7 +1672,14 @@ export function sopOptimizeTool(deps: {
           lines.push("### Suggestions:");
           for (let i = 0; i < proposal.suggestions.length; i++) {
             const sug = proposal.suggestions[i]!;
-            lines.push(`  ${i + 1}. [${sug.type}] Step ${sug.step ?? "N/A"}: ${sug.reason}`);
+            // Check if there's a local override for this suggestion's target/capability
+            const localOverride = overrideManager.listOverrides().find(
+              (o) => o.target === sug.target && o.capability === sug.capability
+            );
+            const overrideNote = localOverride
+              ? ` [LOCAL OVERRIDE: ${JSON.stringify(localOverride.overriddenValue)}]`
+              : "";
+            lines.push(`  ${i + 1}. [${sug.type}] Step ${sug.step ?? "N/A"}: ${sug.reason}${overrideNote}`);
             lines.push(`     Current: ${sug.current}`);
             lines.push(`     Suggested: ${sug.suggested}`);
             lines.push(`     Auto-apply: ${sug.autoApply ? "yes" : "no (requires approval)"}`);
@@ -1677,12 +1711,28 @@ export function sopOptimizeTool(deps: {
       }
 
       if (a.action === "apply") {
+        const overrideManager2 = createPlatformOverrideManager(stateDir, {
+          pending: () => [],
+          get: () => undefined,
+          create: () => ({} as any),
+          resolve: () => ({} as any),
+          markNotified: () => {},
+        } as any);
+
         const lowRiskSuggestions = proposal.suggestions.filter((s) => s.autoApply);
         const highRiskSuggestions = proposal.suggestions.filter((s) => !s.autoApply);
 
-        if (highRiskSuggestions.length > 0 && !a.auto_apply_low_risk) {
+        // Filter out suggestions that have local overrides (respect user's choice)
+        const effectiveHighRisk = highRiskSuggestions.filter((s) => {
+          const localOverride = overrideManager2.listOverrides().find(
+            (o) => o.target === s.target && o.capability === s.capability
+          );
+          return !localOverride;
+        });
+
+        if (effectiveHighRisk.length > 0 && !a.auto_apply_low_risk) {
           return errResult(
-            `Cannot apply: ${highRiskSuggestions.length} high-risk suggestions require owner approval. ` +
+            `Cannot apply: ${effectiveHighRisk.length} high-risk suggestions require owner approval. ` +
             `Use auto_apply_low_risk=true to apply only low-risk changes (role map regeneration).`,
           );
         }
@@ -1692,7 +1742,7 @@ export function sopOptimizeTool(deps: {
 
         const lines = [
           `Applied ${changes.length} low-risk changes to "${a.sop_title}".`,
-          `High-risk suggestions (${highRiskSuggestions.length}) require owner approval.`,
+          `High-risk suggestions (${effectiveHighRisk.length}) require owner approval.`,
           "",
           "Next: review the suggestions above and approve/reject each one.",
         ];

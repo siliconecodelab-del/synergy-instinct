@@ -18,7 +18,7 @@
  * The entry file is parsed for stage references (e.g. "stages/triage.md").
  * Each stage contract becomes an `agent` node in a `chain`, wired in order.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
@@ -234,11 +234,10 @@ export function saveDslWorkflow(
   stateDir: { path: (...parts: string[]) => string },
   result: IcmToDslResult,
 ): { path: string; workflow: Workflow } {
-  const fs = require("node:fs");
   const dslDir = stateDir.path("agentrun", "dsls");
-  fs.mkdirSync(dslDir, { recursive: true });
+  mkdirSync(dslDir, { recursive: true });
   const fileName = `${slugify(result.workflow.name)}.json`;
   const filePath = join(dslDir, fileName);
-  fs.writeFileSync(filePath, JSON.stringify(result.workflow, null, 2), "utf8");
+  writeFileSync(filePath, JSON.stringify(result.workflow, null, 2), "utf8");
   return { path: filePath, workflow: result.workflow };
 }

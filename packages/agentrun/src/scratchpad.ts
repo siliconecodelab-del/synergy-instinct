@@ -10,7 +10,7 @@
  * Storage: <data>/agentrun/scratchpad/<hash>.json
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { StateDir } from "@open-instinct/core";
 
@@ -89,7 +89,7 @@ export class Scratchpad {
     const file = this.file(key);
     if (!existsSync(file)) return false;
     try {
-      require("node:fs").unlinkSync(file);
+      unlinkSync(file);
       return true;
     } catch {
       return false;
@@ -100,7 +100,7 @@ export class Scratchpad {
   list(): string[] {
     let entries: string[];
     try {
-      entries = require("node:fs").readdirSync(this.dir);
+      entries = readdirSync(this.dir);
     } catch {
       return [];
     }
@@ -108,7 +108,7 @@ export class Scratchpad {
     for (const e of entries) {
       if (!e.endsWith(".json")) continue;
       try {
-        const entry = JSON.parse(require("node:fs").readFileSync(join(this.dir, e), "utf8")) as { key?: string };
+        const entry = JSON.parse(readFileSync(join(this.dir, e), "utf8")) as { key?: string };
         if (entry.key) keys.push(entry.key);
       } catch {
         // skip unreadable entries

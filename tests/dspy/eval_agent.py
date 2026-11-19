@@ -17,18 +17,22 @@ import time
 import requests
 
 
-def send_message(url: str, message: str, timeout: int = 60) -> dict:
+def send_message(url: str, message: str, chat_token: str | None = None, timeout: int = 60) -> dict:
     """Send a message to the agent and return the response."""
+    headers = {"Content-Type": "application/json"}
+    if chat_token:
+        headers["x-instinct-token"] = chat_token
     resp = requests.post(
         f"{url}/chat",
         json={"message": message},
+        headers=headers,
         timeout=timeout,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def evaluate_case(url: str, case: dict) -> dict:
+def evaluate_case(url: str, case: dict, chat_token: str | None = None) -> dict:
     """Evaluate a single golden case."""
     result = {
         "id": case["id"],
@@ -41,7 +45,7 @@ def evaluate_case(url: str, case: dict) -> dict:
     }
 
     try:
-        resp = send_message(url, case["input"])
+        resp = send_message(url, case["input"], chat_token=chat_token)
         response_text = resp.get("response", "")
 
         # Check if expected tool was mentioned/called
@@ -97,7 +101,7 @@ def evaluate_case(url: str, case: dict) -> dict:
     return result
 
 
-def run_evaluation(url: str, cases_path: str) -> dict:
+def run_evaluation(url: str, cases_path: str, chat_token: str | None = None) -> dict:
     """Run the full evaluation suite."""
     with open(cases_path) as f:
         cases = json.load(f)
@@ -108,7 +112,7 @@ def run_evaluation(url: str, cases_path: str) -> dict:
 
     for case in cases:
         print(f"  Evaluating: {case['id']}...", end=" ", flush=True)
-        result = evaluate_case(url, case)
+        result = evaluate_case(url, case, chat_token=chat_token)
         results.append(result)
         if result["passed"]:
             passed += 1
@@ -132,13 +136,14 @@ def main():
     parser.add_argument("--url", required=True, help="Agent URL (e.g., http://127.0.0.1:8099)")
     parser.add_argument("--cases", default="golden_cases.json", help="Path to golden cases JSON")
     parser.add_argument("--output", default=None, help="Output results JSON path")
+    parser.add_argument("--chat-token", default=None, help="INSTINCT_CHAT_TOKEN for /chat auth")
     args = parser.parse_args()
 
     print(f"Evaluating agent at {args.url}")
     print(f"Cases: {args.cases}")
     print()
 
-    report = run_evaluation(args.url, args.cases)
+    report = run_evaluation(args.url, args.cases, chat_token=args.chat_token)
 
     print()
     print(f"Results: {report['passed']}/{report['total']} passed ({report['accuracy']:.1%})")

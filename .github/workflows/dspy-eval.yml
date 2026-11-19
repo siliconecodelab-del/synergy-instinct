@@ -41,6 +41,7 @@ jobs:
           export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
           export OPENAI_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
           export INSTINCT_AGENTRUN=1
+          export INSTINCT_CHAT_TOKEN="eval-chat-token-12345"
           export INSTINCT_SKILLS_DIR="$GITHUB_WORKSPACE/skills"
           export INSTINCT_COMPUTER="none"
           node packages/cli/dist/bin.js dev --port 8099 &
@@ -52,7 +53,8 @@ jobs:
           python tests/dspy/eval_agent.py \
             --url http://127.0.0.1:8099 \
             --cases tests/dspy/golden_cases.json \
-            --output /tmp/eval-results.json
+            --output /tmp/eval-results.json \
+            --chat-token "eval-chat-token-12345"
 
       - name: Upload results
         if: always()
