@@ -169,11 +169,20 @@ export class MaritimeMcpBackend implements ComputerBackend {
   private wrap(tool: Tool): RegisteredTool {
     const name = sanitizeToolName(tool.name);
     const hint = TOOL_HINTS[tool.name];
+    // `computer_id` is injected by this backend (fetched via get_computer when
+    // nothing is remembered), so the model must not be forced to supply it: the
+    // hosted schema marks it required, but for the model it is optional.
+    const parameters = mcpSchemaToTypeBox(tool.inputSchema);
+    if (isRecord(parameters) && Array.isArray(parameters.required)) {
+      const filtered = parameters.required.filter((r: unknown) => r !== "computer_id");
+      if (filtered.length === 0) delete parameters.required;
+      else parameters.required = filtered;
+    }
     return defineTool({
       name,
       label: tool.title ?? tool.name,
       description: tool.description ?? tool.name,
-      parameters: mcpSchemaToTypeBox(tool.inputSchema),
+      parameters,
       meta: { ...META, describe: (args) => describeCall(tool.name, args) },
       execute: async (args, _ctx, signal): Promise<ToolResultLike> => {
         try {

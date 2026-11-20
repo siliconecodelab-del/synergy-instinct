@@ -242,7 +242,10 @@ export async function boot(env, opts = {}) {
         maritimeApiKey: env.MARITIME_API_KEY,
         externalUserId,
         // Maritime starts the desktop stack in the background; desktopd may still be coming up.
-        expectDesktopd: env.MARITIME_DESKTOP === "1",
+        // A hosted agent (MARITIME_AGENT_ID present) runs on a Maritime VM, so treat it like
+        // MARITIME_DESKTOP=1 even when the platform flag is missing: otherwise a slow desktopd
+        // start is mistaken for "no desktop" and the agent reports computer: none.
+        expectDesktopd: env.MARITIME_DESKTOP === "1" || Boolean(env.MARITIME_AGENT_ID),
         ...(env.MARITIME_AGENT_ID ? { agentId: env.MARITIME_AGENT_ID } : {}),
         ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
         logger: log,

@@ -99,6 +99,13 @@ export function loadConfig(state: StateDir, env: NodeJS.ProcessEnv): InstinctCon
   }
   const cfg = withDefaults(state.readJson<Partial<InstinctConfig>>(FILE, {}));
   if (env.INSTINCT_MODEL?.trim()) cfg.model.primary = env.INSTINCT_MODEL.trim();
+  // Like INSTINCT_MODEL, the computer mode is an operator override: a VM or
+  // container image may (re)declare INSTINCT_COMPUTER after config.json was
+  // first written, and a stale persisted mode (e.g. "auto" or "none") must not
+  // keep a maritime key from being used. The override is per process; the file
+  // keeps what was saved.
+  const computerMode = env.INSTINCT_COMPUTER?.trim() as InstinctConfig["computer"]["mode"] | undefined;
+  if (computerMode && COMPUTER_MODES.has(computerMode)) cfg.computer.mode = computerMode;
   // Like INSTINCT_MODEL, the toolkit list is an operator override: the gateway
   // recomputes COMPOSIO_TOOLKITS per person (new toolkits, connection gating)
   // and pushes it to running agents. The override is per process; the file

@@ -204,11 +204,14 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
   if (!env.some((e) => e.key === "INSTINCT_AGENTRUN")) {
     env.push({ key: "INSTINCT_AGENTRUN", value: "1", isSecret: false });
   }
-  // Match the desktop flag the create body uses: a hosted computer when the VM
-  // has one (the historic default), none otherwise.
+  // Match the desktop flag the create body uses: an in-VM desktop when the VM
+  // has one (the historic default). A desktop-less agent still gets a hosted
+  // Maritime computer when a narrow computers key is available, via "auto"
+  // (desktopd -> maritime fallback); otherwise no computer at all.
   if (!env.some((e) => e.key === "INSTINCT_COMPUTER")) {
     const desktop = deps.template ? deps.template.hardware.desktop : deps.maritime.desktop ?? true;
-    env.push({ key: "INSTINCT_COMPUTER", value: desktop ? "auto" : "none", isSecret: false });
+    const mode = desktop ? "auto" : (deps.maritime.computersKey ? "auto" : "none");
+    env.push({ key: "INSTINCT_COMPUTER", value: mode, isSecret: false });
   }
   if (deps.template) applyTemplateEnv(env, deps.template);
   // Gateway-managed toolkits need boot state the agent cannot create itself:

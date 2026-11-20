@@ -47,13 +47,14 @@ describe("config", () => {
     expect(loadConfig(tempState(), { INSTINCT_ACK_SLOW_REPLIES: "true" }).features.ackSlowReplies).toBe(true);
   });
 
-  it("prefers the file over env on later loads, except INSTINCT_MODEL", () => {
+  it("prefers the file over env on later loads, except INSTINCT_MODEL and INSTINCT_COMPUTER", () => {
     const state = tempState();
     loadConfig(state, { INSTINCT_OWNER_NAME: "Maria", INSTINCT_OWNER_PHONE: "+16175550100" });
     const again = loadConfig(state, { INSTINCT_OWNER_NAME: "Someone Else", INSTINCT_OWNER_PHONE: "+19999999999", INSTINCT_COMPUTER: "none" });
     expect(again.owner.name).toBe("Maria");
     expect(again.owner.phones).toEqual(["+16175550100"]);
-    expect(again.computer.mode).toBe("auto");
+    // INSTINCT_COMPUTER is now an operator override, like INSTINCT_MODEL.
+    expect(again.computer.mode).toBe("none");
     const swapped = loadConfig(state, { INSTINCT_MODEL: "openai-compatible/gpt-5" });
     expect(swapped.model.primary).toBe("openai-compatible/gpt-5");
     // The override is per process; the file keeps what was saved.
