@@ -10,6 +10,10 @@
 export { makeAdapters, type AgentRunAdapterDeps } from "./adapters.js";
 export { runWorkflowWithRecovery, type AgentRunAdapters } from "./runner.js";
 export type { AgentRunResult, PreflightSpec } from "./types.js";
+export { listSOPs } from "./sop-generator.js";
+export { parseSOP } from "./sop-okf.js";
+export type { ConditionEvaluatorDeps } from "./condition-evaluator.js";
+export { evaluateCondition } from "./condition-evaluator.js";
 export { Scratchpad } from "./scratchpad.js";
 export { TurnTraceRecorder, argsHash, type TurnTrace, type TurnTraceInput } from "./trace.js";
 export { initTelemetry, shutdownTelemetry, startSpan, spanSetAttributes, spanEnd, withSpan, type Telemetry } from "./telemetry.js";
@@ -21,7 +25,7 @@ export { readPipelinePrefs, writePipelinePrefs, type PipelinePrefs, type Pipelin
 export { readSOPVisualPrefs, writeSOPVisualPrefs, type SOPVisualPrefs, type SOPVisualPrefFormat } from "./sop-visual-prefs.js";
 export { buildSOPArchifySpec, renderSOPVisualArtifact, summarizeRoleMapArtifact, resolveArchifyCli, resolveChrome, resolveFfmpeg, sopSlug, type ArchifyWorkflowSpec, type SOPVisualArtifact, type SOPVisualFormat, type SOPRenderedFormat, type SOPVisualRenderOptions } from "./sop-visualizer.js";
 export { listPresets, loadPreset, savePreset, deletePreset, type PipelinePreset } from "./pipeline-presets.js";
-export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, DEEP_RESEARCH_TOOLKITS, buildSOPToolResearchPrompt, type SOPToolResearchOptions, type SOPToolResearchPlan } from "./tool.js";
+export { agentrunTool, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, registerLoopTool, DEEP_RESEARCH_TOOLKITS, buildSOPToolResearchPrompt, type SOPToolResearchOptions, type SOPToolResearchPlan } from "./tool.js";
 export { platformApproveTool } from "./platform-approve-tool.js";
 export { platformOverrideTool } from "./platform-override-tool.js";
 export { buildSOPRoleMap, type SOPRoleMap } from "./sop-okf.js";

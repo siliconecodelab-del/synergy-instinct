@@ -194,6 +194,12 @@ export interface ScheduleEntry {
   prompt: string;
   createdAt: string;
   lastRunAt?: string;
+  /** Condition expression that gates whether the cron fires. Empty/undefined means always fire. */
+  condition?: string;
+  /** Maximum number of times to run. Undefined means unlimited. */
+  maxRuns?: number;
+  /** Current number of successful runs. */
+  runCount?: number;
 }
 
 // ---------------------------------------------------------------------------

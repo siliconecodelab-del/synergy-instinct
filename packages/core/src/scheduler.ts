@@ -215,10 +215,16 @@ function newId(): string {
 export class Scheduler {
   private readonly state: StateDir;
   private readonly now: () => Date;
+  private conditionEvaluator?: (entry: ScheduleEntry) => Promise<boolean>;
 
   constructor(state: StateDir, opts: { now?: () => Date } = {}) {
     this.state = state;
     this.now = opts.now ?? (() => new Date());
+  }
+
+  /** Set the condition evaluator after construction (useful for forward references). */
+  setConditionEvaluator(evaluator: (entry: ScheduleEntry) => Promise<boolean>): void {
+    this.conditionEvaluator = evaluator;
   }
 
   private load(): ScheduleEntry[] {
@@ -258,6 +264,7 @@ export class Scheduler {
       tz,
       id: newId(),
       createdAt: this.now().toISOString(),
+      runCount: input.runCount ?? 0,
     };
     if (nextRunAt !== undefined) entry.nextRunAt = new Date(nextRunAt).toISOString();
     const list = this.load();
@@ -274,19 +281,40 @@ export class Scheduler {
     return true;
   }
 
-  due(now: Date = this.now()): ScheduleEntry[] {
+  async due(now: Date = this.now()): Promise<ScheduleEntry[]> {
     const t = now.getTime();
-    return this.load()
+    const due = this.load()
       .filter((e) => e.enabled && e.nextRunAt !== undefined && Date.parse(e.nextRunAt) <= t)
       .map((e) => ({ ...e }));
+    // Filter by condition if an evaluator is configured
+    if (this.conditionEvaluator) {
+      const allowed: ScheduleEntry[] = [];
+      for (const entry of due) {
+        try {
+          if (await this.conditionEvaluator(entry)) allowed.push(entry);
+        } catch {
+          // If the condition evaluator throws, treat as not allowed to avoid firing blindly
+        }
+      }
+      return allowed;
+    }
+    return due;
   }
 
-  /** Record a run and move `nextRunAt` forward. One-shot entries are disabled. */
+  /** Record a run and move `nextRunAt` forward. One-shot entries are disabled. Entries that hit maxRuns are disabled. */
   markRan(id: string, now: Date = this.now()): void {
     const list = this.load();
     const e = list.find((x) => x.id === id);
     if (!e) return;
     e.lastRunAt = now.toISOString();
+    e.runCount = (e.runCount ?? 0) + 1;
+    // Disable if maxRuns reached
+    if (e.maxRuns !== undefined && e.runCount >= e.maxRuns) {
+      e.enabled = false;
+      delete e.nextRunAt;
+      this.save(list);
+      return;
+    }
     const next = this.nextRun(e, now);
     if (next) e.nextRunAt = next.toISOString();
     else {
@@ -336,7 +364,7 @@ export class Scheduler {
       if (running) return;
       running = true;
       try {
-        for (const entry of this.due()) {
+        for (const entry of await this.due()) {
           this.markRan(entry.id);
           try {
             await onFire(entry);

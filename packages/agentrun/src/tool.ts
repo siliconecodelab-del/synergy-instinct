@@ -8,7 +8,8 @@
 import { Type } from "typebox";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler } from "@open-instinct/core";
+import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler, parseCron, isValidTimeZone } from "@open-instinct/core";
+import { sopSlug } from "./sop-visualizer.js";
 import { createPlatformOverrideManager } from "@open-instinct/core";
 import {
   inspectWorkflow,
@@ -219,8 +220,9 @@ export function sopArchitectTool(deps: {
   stateDir: StateDir;
   composio?: ComposioLike;
   defaultTools?: string[];
+  scheduler?: Scheduler;
 }): RegisteredTool {
-  const { stateDir, composio, defaultTools = [] } = deps;
+  const { stateDir, composio, defaultTools = [], scheduler } = deps;
 
   return defineTool({
     name: "generate_dynamic_sop",
@@ -252,6 +254,14 @@ export function sopArchitectTool(deps: {
       raw_procedural_steps: Type.String({
         description: "Markdown-formatted instructions, steps, or notes forming the body of the SOP.",
       }),
+      schedule: Type.Optional(
+        Type.Object({
+          cron: Type.String({ description: "5-field cron expression, e.g. '0 8 * * *'" }),
+          tz: Type.Optional(Type.String({ description: "Time zone, e.g. 'America/New_York'" })),
+          prompt: Type.Optional(Type.String({ description: "Prompt to run when the schedule fires" })),
+          condition: Type.Optional(Type.String({ description: "Optional condition expression that gates firing" })),
+        }, { description: "Optional recurring schedule for this SOP. When present, a cron is auto-registered." }),
+      ),
     }),
     meta: {
       capabilities: ["converse"],
@@ -271,6 +281,7 @@ export function sopArchitectTool(deps: {
         core_objective: args.core_objective,
         required_tools_or_skills: requiredTools,
         raw_procedural_steps: args.raw_procedural_steps,
+        schedule: args.schedule,
       });
 
       // Validate frontmatter against OKF schema
@@ -284,6 +295,24 @@ export function sopArchitectTool(deps: {
       // Write to disk (refuses to overwrite existing)
       try {
         const { path } = writeSOP(stateDir, doc);
+
+        // Register/update cron for SOP-declared schedule
+        if (scheduler && doc.frontmatter.schedule) {
+          const { schedule } = doc.frontmatter;
+          const cronName = `sop-${sopSlug(doc.frontmatter.title)}`;
+          const existing = scheduler.list().find((e) => e.name === cronName);
+          if (existing) {
+            scheduler.delete(existing.id);
+          }
+          scheduler.create({
+            name: cronName,
+            prompt: schedule.prompt ?? `Run the SOP "${doc.frontmatter.title}".`,
+            enabled: true,
+            cron: schedule.cron,
+            tz: schedule.tz ?? "UTC",
+            condition: schedule.condition,
+          });
+        }
         const roleMap = doc.body.role_map ?? buildSOPRoleMap(doc.frontmatter.execution_classification, doc.body.steps, args.sop_title);
 
         // Seed or update PipelineStore record so proactive nudges know this SOP's state & classification
@@ -1267,6 +1296,73 @@ export function pipelineScheduleTool(deps: { stateDir: StateDir }): RegisteredTo
         return okResult(`Pipeline "${a.id}" unscheduled.`);
       }
       return errResult("unknown action");
+    },
+  });
+}
+
+/**
+ * Register a recurring loop cron for agent-run tasks. Loops fire on a cron,
+ * are gated by an optional condition expression, and support maxRuns lifecycle.
+ * Use this for any recurring task the agent should self-wake on: checking
+ * for new LinkedIn replies, monitoring pipeline health, scanning for expired
+ * approvals, etc.
+ */
+export function registerLoopTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const scheduler = new Scheduler(deps.stateDir);
+
+  return defineTool({
+    name: "register_loop",
+    label: "Register Loop",
+    description:
+      "Register a recurring cron loop. Parameters: name (unique), cron (5 fields), tz, prompt, condition (optional gating expression), maxRuns (optional max executions), enabled (start on/off).",
+    parameters: Type.Object({
+      name: Type.String({ description: "Unique loop name (e.g. 'linkedin-reply-check')" }),
+      cron: Type.String({ description: "5-field cron expression, e.g. '0 */2 * * *'" }),
+      tz: Type.Optional(Type.String({ description: "Time zone, e.g. 'America/New_York'" })),
+      prompt: Type.String({ description: "Prompt delivered to the owner when the loop fires" }),
+      condition: Type.Optional(Type.String({ description: "Optional condition expression (e.g. 'pending_approvals_older_than(4h) > 0')" })),
+      maxRuns: Type.Optional(Type.Number({ description: "Maximum number of runs before auto-disabling" })),
+      enabled: Type.Optional(Type.Boolean({ description: "Start enabled (default true)" })),
+    }),
+    meta: { capabilities: ["converse"], group: "system", describe: (a) => `register_loop ${(a as { name?: string }).name ?? ""}` },
+    execute: async (args: any): Promise<ToolResultLike> => {
+      const a = args as {
+        name: string;
+        cron: string;
+        tz?: string;
+        prompt: string;
+        condition?: string;
+        maxRuns?: number;
+        enabled?: boolean;
+      };
+      if (!a.name || !a.name.trim()) return errResult("name is required.");
+      if (!a.cron || !a.cron.trim()) return errResult("cron is required.");
+      try {
+        // Validate cron expression
+        parseCron(a.cron);
+      } catch {
+        return errResult(`Invalid cron expression: ${a.cron}`);
+      }
+      if (a.tz && !isValidTimeZone(a.tz)) {
+        return errResult(`Unknown time zone: ${a.tz}`);
+      }
+      if (scheduler.list().some((e) => e.name === a.name)) {
+        return errResult(`Loop "${a.name}" already exists. Use a different name or delete the existing one first.`);
+      }
+      const entry = scheduler.create({
+        name: a.name,
+        prompt: a.prompt,
+        enabled: a.enabled ?? true,
+        cron: a.cron,
+        tz: a.tz ?? "UTC",
+        condition: a.condition,
+        maxRuns: a.maxRuns,
+      });
+      return okResult(
+        `Loop "${a.name}" registered: ${a.cron} ${a.tz ?? "UTC"}${
+          a.condition ? ` (condition: ${a.condition})` : ""
+        }${a.maxRuns !== undefined ? ` (maxRuns: ${a.maxRuns})` : ""}. Job ${entry.id}.`,
+      );
     },
   });
 }

@@ -31,6 +31,8 @@ export interface SOPFrontmatter {
   version: string;
   /** Lifecycle status. */
   status: SOPStatus;
+  /** Optional recurring schedule for this SOP. When present, a cron is auto-registered. */
+  schedule?: { cron: string; tz?: string; prompt?: string; condition?: string };
 }
 
 /** Minimal interface the SOP tool needs from ComposioApps to check tool availability. */
@@ -493,6 +495,7 @@ export function buildSOPDocument(params: {
   required_tools_or_skills: string[];
   raw_procedural_steps: string;
   created_at?: string;
+  schedule?: { cron: string; tz?: string; prompt?: string; condition?: string };
 }): SOPDocument {
   const {
     sop_title,
@@ -502,6 +505,7 @@ export function buildSOPDocument(params: {
     required_tools_or_skills,
     raw_procedural_steps,
     created_at = new Date().toISOString(),
+    schedule,
   } = params;
 
   const rawSteps: string[] = [];
@@ -583,6 +587,7 @@ export function buildSOPDocument(params: {
       created_at,
       version: OKF_SCHEMA_VERSION,
       status: "draft",
+      ...(schedule ? { schedule } : {}),
     },
     body: {
       role_map: roleMap,

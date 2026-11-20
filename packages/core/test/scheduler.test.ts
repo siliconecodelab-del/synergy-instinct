@@ -98,44 +98,44 @@ describe("nextCron", () => {
 });
 
 describe("Scheduler store", () => {
-  it("creates cron entries with a computed nextRunAt and advances them", () => {
+  it("creates cron entries with a computed nextRunAt and advances them", async () => {
     let now = new Date("2026-10-03T12:00:00Z");
     const s = new Scheduler(tempState(), { now: () => now });
     const e = s.create({ name: "morning", enabled: true, cron: "0 9 * * *", tz: "America/New_York", prompt: "Send my morning brief" });
     expect(e.id).toMatch(/^s_/);
     expect(e.nextRunAt).toBe("2026-10-03T13:00:00.000Z");
     expect(s.list()).toHaveLength(1);
-    expect(s.due()).toHaveLength(0);
+    expect((await s.due()).length).toBe(0);
 
     now = new Date("2026-10-03T13:00:30Z");
-    expect(s.due().map((x) => x.id)).toEqual([e.id]);
+    expect((await s.due()).map((x) => x.id)).toEqual([e.id]);
     s.markRan(e.id);
     const after = s.get(e.id)!;
     expect(after.lastRunAt).toBe(now.toISOString());
     expect(after.nextRunAt).toBe("2026-10-04T13:00:00.000Z");
     expect(after.enabled).toBe(true);
-    expect(s.due()).toHaveLength(0);
+    expect((await s.due()).length).toBe(0);
   });
 
-  it("disables one-shot entries after they run", () => {
+  it("disables one-shot entries after they run", async () => {
     let now = new Date("2026-10-03T12:00:00Z");
     const s = new Scheduler(tempState(), { now: () => now });
     const e = s.create({ enabled: true, prompt: "Remind me to call mom", nextRunAt: "2026-10-03T18:00:00Z" });
     expect(e.cron).toBeUndefined();
     expect(e.nextRunAt).toBe("2026-10-03T18:00:00.000Z");
     now = new Date("2026-10-03T18:00:05Z");
-    expect(s.due()).toHaveLength(1);
+    expect((await s.due()).length).toBe(1);
     s.markRan(e.id);
     const after = s.get(e.id)!;
     expect(after.enabled).toBe(false);
     expect(after.nextRunAt).toBeUndefined();
-    expect(s.due()).toHaveLength(0);
+    expect((await s.due()).length).toBe(0);
   });
 
-  it("ignores disabled entries and deletes", () => {
+  it("ignores disabled entries and deletes", async () => {
     const s = new Scheduler(tempState(), { now: () => new Date("2026-10-03T12:00:00Z") });
     const e = s.create({ enabled: false, prompt: "x", nextRunAt: "2026-10-01T00:00:00Z" });
-    expect(s.due()).toHaveLength(0);
+    expect((await s.due()).length).toBe(0);
     expect(s.delete(e.id)).toBe(true);
     expect(s.delete(e.id)).toBe(false);
     expect(s.list()).toHaveLength(0);
