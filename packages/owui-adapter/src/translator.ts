@@ -3,6 +3,8 @@
  * Instinct agent (/chat) formats.
  */
 
+import { randomUUID } from "node:crypto";
+
 // ── OpenAI-compatible types ──────────────────────────────────────────────
 
 export interface OpenAIMessage {
@@ -132,7 +134,7 @@ export function instinctToOpenAI(
   const completionTokens = Math.ceil(content.split(/\s+/).length * 1.3);
 
   return {
-    id: `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+    id: `chatcmpl-${randomUUID().replace(/-/g, "").slice(0, 24)}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,

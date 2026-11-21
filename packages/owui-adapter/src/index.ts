@@ -17,7 +17,7 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { createAgentClientFromEnv } from "./maritime.js";
+import { createAgentClientFromEnv, MaritimeClient } from "./maritime.js";
 import type { AgentClient } from "./maritime.js";
 import {
   type OpenAIChatRequest,
@@ -32,8 +32,12 @@ import {
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const ADAPTER_TOKEN = process.env.ADAPTER_TOKEN || "";
 const MODEL_ID = process.env.MODEL_ID || "instinct-agent-local";
+const MARITIME_API_URL = process.env.MARITIME_API_URL || "https://api.maritime.sh";
+const MARITIME_API_KEY = process.env.MARITIME_API_KEY || "";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const OPENWEBUI_URL = process.env.OPENWEBUI_URL || "";
+const OPENWEBUI_ADMIN_TOKEN = process.env.OPENWEBUI_ADMIN_TOKEN || "";
 
 // Cache of agent client instances by external ID (local mode) or maritime agent id (prod mode)
 const clientCache = new Map<string, AgentClient>();
@@ -43,7 +47,15 @@ function getAgentClient(externalId: string): AgentClient {
   const cacheKey = process.env.AGENT_CHAT_URL ? "local" : externalId;
   let client = clientCache.get(cacheKey);
   if (!client) {
-    client = createAgentClientFromEnv();
+    if (process.env.AGENT_CHAT_URL) {
+      client = createAgentClientFromEnv();
+    } else {
+      // Production mode: create MaritimeClient with the externalId from the model name
+      const baseUrl = process.env.MARITIME_API_URL || "https://api.maritime.sh";
+      const apiKey = process.env.MARITIME_API_KEY || "";
+      const chatToken = process.env.INSTINCT_CHAT_TOKEN;
+      client = new MaritimeClient({ baseUrl, apiKey, agentId: "", externalId, chatToken });
+    }
     clientCache.set(cacheKey, client);
   }
   return client;
@@ -244,7 +256,6 @@ async function handleChatCompletions(req: http.IncomingMessage, res: http.Server
 
 async function handleModels(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   // Models list is read-only; allow with shared token for discovery.
-  // Per-model access is enforced at chat time.
   if (!validateAdapterToken(req)) {
     return sendJson(res, 401, { error: { message: "Invalid or missing adapter token", type: "auth_error" } });
   }
@@ -270,6 +281,7 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
   }
 
   // In production mode, query Supabase for all ready adapter rows
+  // ── Layer 1: Only return models whose agent still exists in Maritime ──
   if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
     try {
       const url = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id&status=eq.ready`;
@@ -283,12 +295,43 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
       if (res2.ok) {
         const rows = (await res2.json()) as Array<{ instinct_user_id: string }>;
         for (const row of rows) {
-          data.push({
-            id: `instinct-agent-${row.instinct_user_id}`,
-            object: "model",
-            created: now,
-            owned_by: "instinct-agent",
-          });
+          const externalId = row.instinct_user_id;
+          try {
+            const agentUrl = `${MARITIME_API_URL.replace(/\/+$/, "")}/api/agents?externalId=${encodeURIComponent(externalId)}`;
+            const agentRes = await fetch(agentUrl, {
+              headers: { Authorization: `Bearer ${MARITIME_API_KEY}` },
+            });
+            if (agentRes.ok) {
+              const agents = (await agentRes.json()) as any[];
+              const exists = Array.isArray(agents) && agents.some((a: any) => a.externalId === externalId);
+              if (exists) {
+                data.push({
+                  id: `instinct-agent-${externalId}`,
+                  object: "model",
+                  created: now,
+                  owned_by: "instinct-agent",
+                });
+              } else {
+                console.warn(`[adapter] Skipping ghost agent: ${externalId} (not found in Maritime)`);
+              }
+            } else {
+              // Maritime check failed — include model anyway (fail-open for availability)
+              data.push({
+                id: `instinct-agent-${externalId}`,
+                object: "model",
+                created: now,
+                owned_by: "instinct-agent",
+              });
+            }
+          } catch {
+            // Network error — include model anyway (fail-open for availability)
+            data.push({
+              id: `instinct-agent-${externalId}`,
+              object: "model",
+              created: now,
+              owned_by: "instinct-agent",
+            });
+          }
         }
       }
     } catch {
@@ -305,6 +348,127 @@ async function handleHealth(req: http.IncomingMessage, res: http.ServerResponse)
     mode: process.env.AGENT_CHAT_URL ? "local" : "maritime",
     supabase: Boolean(SUPABASE_URL),
   });
+}
+
+// ── Layer 3: Startup reconciliation ──────────────────────────────────────
+// On adapter startup, fetch all Open WebUI models and delete any that don't
+// have corresponding instinct_agent_adapters rows in Supabase.
+async function reconcileModelsWithAdapterTable(): Promise<void> {
+  if (!OPENWEBUI_URL || !OPENWEBUI_ADMIN_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    console.log("[adapter] Reconciliation skipped — missing config");
+    return;
+  }
+
+  try {
+    // 1. Fetch all instinct-agent models from Open WebUI
+    const owuiRes = await fetch(`${OPENWEBUI_URL}/api/v1/models/list`, {
+      headers: { Authorization: `Bearer ${OPENWEBUI_ADMIN_TOKEN}` },
+    });
+    if (!owuiRes.ok) {
+      console.warn(`[adapter] Reconciliation: failed to fetch OWUI models (${owuiRes.status})`);
+      return;
+    }
+    const owuiData = (await owuiRes.json()) as { items?: Array<{ id: string }> };
+    const owuiModels = (owuiData.items || []).filter((m) =>
+      m.id.startsWith("instinct-agent-"),
+    );
+    const owuiModelIds = new Set(owuiModels.map((m) => m.id));
+
+    // 2. Fetch all adapter rows from Supabase
+    const supaRes = await fetch(
+      `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id,user_id&status=eq.ready`,
+      {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          Accept: "application/json",
+        },
+      },
+    );
+    if (!supaRes.ok) {
+      console.warn(`[adapter] Reconciliation: failed to fetch adapter rows (${supaRes.status})`);
+      return;
+    }
+    const adapterRows = (await supaRes.json()) as Array<{ instinct_user_id: string; user_id: string }>;
+    const expectedModelIds = new Set(adapterRows.map((r) => `instinct-agent-${r.instinct_user_id}`));
+
+    // 3. Delete orphaned models from Open WebUI (ghosts)
+    let cleaned = 0;
+    for (const model of owuiModels) {
+      if (!expectedModelIds.has(model.id)) {
+        try {
+          const delRes = await fetch(`${OPENWEBUI_URL}/api/v1/models/model/delete`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${OPENWEBUI_ADMIN_TOKEN}`,
+            },
+            body: JSON.stringify({ id: model.id }),
+          });
+          if (delRes.ok) {
+            console.log(`[adapter] Reconciliation: deleted orphan model ${model.id}`);
+            cleaned++;
+          } else {
+            console.warn(`[adapter] Reconciliation: failed to delete ${model.id} (${delRes.status})`);
+          }
+        } catch (err) {
+          console.warn(`[adapter] Reconciliation: error deleting ${model.id}: ${(err as Error).message}`);
+        }
+      }
+    }
+
+    // 4. Register missing models in Open WebUI (missing agents)
+    let created = 0;
+    for (const row of adapterRows) {
+      const modelId = `instinct-agent-${row.instinct_user_id}`;
+      if (!owuiModelIds.has(modelId)) {
+        try {
+          const createRes = await fetch(`${OPENWEBUI_URL}/api/v1/models/create`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${OPENWEBUI_ADMIN_TOKEN}`,
+            },
+            body: JSON.stringify({
+              id: modelId,
+              base_model_id: modelId,
+              name: `Instinct Agent (${row.instinct_user_id})`,
+              meta: {
+                description: `Personal instinct agent`,
+                profile_image_url: null,
+              },
+              params: {},
+              access_grants: [{ principal_type: "user", principal_id: row.user_id, permission: "read" }],
+              is_active: true,
+            }),
+          });
+          if (createRes.ok) {
+            console.log(`[adapter] Reconciliation: created missing model ${modelId}`);
+            created++;
+          } else {
+            console.warn(`[adapter] Reconciliation: failed to create ${modelId} (${createRes.status})`);
+          }
+        } catch (err) {
+          console.warn(`[adapter] Reconciliation: error creating ${modelId}: ${(err as Error).message}`);
+        }
+      }
+    }
+
+    console.log(`[adapter] Reconciliation complete: ${cleaned} ghosts removed, ${created} missing created, ${expectedModelIds.size - created} already present`);
+  } catch (err) {
+    console.error(`[adapter] Reconciliation failed: ${(err as Error).message}`);
+  }
+}
+
+// ── Periodic sync (every 5 minutes) ──────────────────────────────────────
+function startPeriodicSync(): void {
+  const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  setInterval(() => {
+    reconcileModelsWithAdapterTable().catch((err) => {
+      console.error(`[adapter] Periodic sync error: ${(err as Error).message}`);
+    });
+  }, SYNC_INTERVAL_MS);
+  console.log("[adapter] Periodic sync started (every 5 minutes)");
 }
 
 const server = http.createServer(async (req, res) => {
@@ -346,6 +510,12 @@ server.listen(PORT, "0.0.0.0", () => {
   } else {
     console.log(`[adapter] Multi-tenant: models queried from Supabase`);
     console.log(`[adapter] Supabase URL: ${SUPABASE_URL || "(not set)"}`);
+    // ── Layer 3: Run startup reconciliation ──
+    reconcileModelsWithAdapterTable().catch((err) => {
+      console.error(`[adapter] Reconciliation error: ${(err as Error).message}`);
+    });
+    // ── Layer 3b: Start periodic sync (every 5 minutes) ──
+    startPeriodicSync();
   }
 });
 
