@@ -376,7 +376,7 @@ async function reconcileModelsWithAdapterTable(): Promise<void> {
 
     // 2. Fetch all adapter rows from Supabase
     const supaRes = await fetch(
-      `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id,user_id&status=eq.ready`,
+      `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id,user_id,status`,
       {
         headers: {
           apikey: SUPABASE_SERVICE_ROLE_KEY,
@@ -389,13 +389,42 @@ async function reconcileModelsWithAdapterTable(): Promise<void> {
       console.warn(`[adapter] Reconciliation: failed to fetch adapter rows (${supaRes.status})`);
       return;
     }
-    const adapterRows = (await supaRes.json()) as Array<{ instinct_user_id: string; user_id: string }>;
+    const adapterRows = (await supaRes.json()) as Array<{ instinct_user_id: string; user_id: string; status: string }>;
     const expectedModelIds = new Set(adapterRows.map((r) => `instinct-agent-${r.instinct_user_id}`));
 
-    // 3. Delete orphaned models from Open WebUI (ghosts)
+    // ── Layer 1+3 combined: Verify each agent still exists in Maritime ──
+    // Agents that don't exist in Maritime are ghosts — remove from both
+    // Open WebUI and Supabase adapter table.
+    const ghostIds = new Set<string>();
+    for (const row of adapterRows) {
+      const externalId = row.instinct_user_id;
+      try {
+        const agentUrl = `${MARITIME_API_URL.replace(/\/+$/, "")}/api/agents?externalId=${encodeURIComponent(externalId)}`;
+        const agentRes = await fetch(agentUrl, {
+          headers: { Authorization: `Bearer ${MARITIME_API_KEY}` },
+        });
+        if (agentRes.ok) {
+          const agents = (await agentRes.json()) as any[];
+          const exists = Array.isArray(agents) && agents.some((a: any) => a.externalId === externalId);
+          if (!exists) {
+            ghostIds.add(externalId);
+            console.warn(`[adapter] Reconciliation: agent ${externalId} not found in Maritime (ghost)`);
+          }
+        } else {
+          console.warn(`[adapter] Reconciliation: Maritime check failed for ${externalId} (${agentRes.status}) — skipping`);
+        }
+      } catch (err) {
+        console.warn(`[adapter] Reconciliation: Maritime check error for ${externalId}: ${(err as Error).message} — skipping`);
+      }
+    }
+
+    // 3. Delete orphaned/ghost models from Open WebUI
     let cleaned = 0;
     for (const model of owuiModels) {
-      if (!expectedModelIds.has(model.id)) {
+      const externalId = model.id.replace("instinct-agent-", "");
+      const isGhost = ghostIds.has(externalId);
+      const isOrphan = !expectedModelIds.has(model.id);
+      if (isGhost || isOrphan) {
         try {
           const delRes = await fetch(`${OPENWEBUI_URL}/api/v1/models/model/delete`, {
             method: "POST",
@@ -406,7 +435,7 @@ async function reconcileModelsWithAdapterTable(): Promise<void> {
             body: JSON.stringify({ id: model.id }),
           });
           if (delRes.ok) {
-            console.log(`[adapter] Reconciliation: deleted orphan model ${model.id}`);
+            console.log(`[adapter] Reconciliation: deleted ${isGhost ? "ghost" : "orphan"} model ${model.id}`);
             cleaned++;
           } else {
             console.warn(`[adapter] Reconciliation: failed to delete ${model.id} (${delRes.status})`);
@@ -417,9 +446,34 @@ async function reconcileModelsWithAdapterTable(): Promise<void> {
       }
     }
 
-    // 4. Register missing models in Open WebUI (missing agents)
+    // 4. Clean up adapter rows for ghost agents (remove from Supabase)
+    for (const ghostId of ghostIds) {
+      try {
+        const delRes = await fetch(
+          `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?instinct_user_id=eq.${ghostId}`,
+          {
+            method: "DELETE",
+            headers: {
+              apikey: SUPABASE_SERVICE_ROLE_KEY,
+              Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              Prefer: "return=representation",
+            },
+          },
+        );
+        if (delRes.ok) {
+          console.log(`[adapter] Reconciliation: removed ghost adapter row ${ghostId}`);
+        }
+      } catch (err) {
+        console.warn(`[adapter] Reconciliation: error removing adapter row ${ghostId}: ${(err as Error).message}`);
+      }
+    }
+
+    // 5. Register missing models in Open WebUI (missing agents)
     let created = 0;
     for (const row of adapterRows) {
+      // Skip ghost agents
+      if (ghostIds.has(row.instinct_user_id)) continue;
+
       const modelId = `instinct-agent-${row.instinct_user_id}`;
       if (!owuiModelIds.has(modelId)) {
         try {
@@ -454,7 +508,7 @@ async function reconcileModelsWithAdapterTable(): Promise<void> {
       }
     }
 
-    console.log(`[adapter] Reconciliation complete: ${cleaned} ghosts removed, ${created} missing created, ${expectedModelIds.size - created} already present`);
+    console.log(`[adapter] Reconciliation complete: ${cleaned} ghosts removed, ${ghostIds.size} adapter rows cleaned, ${created} missing created`);
   } catch (err) {
     console.error(`[adapter] Reconciliation failed: ${(err as Error).message}`);
   }
