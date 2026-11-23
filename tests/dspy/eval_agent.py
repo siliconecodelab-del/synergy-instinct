@@ -8,7 +8,8 @@ Tool invocation is read from the agent's telemetry JSONL
 (<stateDir>/eval/telemetry/YYYY-MM-DD.jsonl), which `recordToolCall` appends
 to synchronously during every tool call. Each eval case is sent with a unique
 `conversation_id` so its `conversationKey = chat:<case-id>` can be matched to
-the telemetry entries written during that turn.
+the telemetry entries written during that turn. Stale entries from prior runs
+are excluded by comparing entry timestamp against the pre-call timestamp.
 
 Usage:
     python eval_agent.py --url http://127.0.0.1:8099 --cases golden_cases.json
@@ -96,7 +97,7 @@ def tools_from_telemetry(entries: list, conversation_key: str) -> list:
     return tools
 
 
-def evaluate_case(url: str, case: dict, chat_token: str | None = None, data_dir: str = "/tmp/instinct-eval", since: str = "") -> dict:
+def evaluate_case(url: str, case: dict, chat_token: str | None = None, data_dir: str = "/tmp/instinct-eval") -> dict:
     """Evaluate a single golden case."""
     result = {
         "id": case["id"],
@@ -106,6 +107,7 @@ def evaluate_case(url: str, case: dict, chat_token: str | None = None, data_dir:
         "actual_tools": [],
         "expected_tools": [],
         "error": None,
+        "response_text": "",
     }
 
     try:
@@ -124,6 +126,7 @@ def evaluate_case(url: str, case: dict, chat_token: str | None = None, data_dir:
             conversation_id=conversation_id,
         )
         response_text = resp.get("response", "")
+        result["response_text"] = response_text
 
         entries = read_telemetry(data_dir, since)
         actual_tools = tools_from_telemetry(entries, conversation_key)
@@ -187,7 +190,12 @@ def run_evaluation(url: str, cases_path: str, chat_token: str | None = None, dat
             print("PASS")
         else:
             failed += 1
-            print(f"FAIL (expected: {result['expected_tools']}, got: {result['actual_tools']})")
+            parts = [f"FAIL (expected: {result['expected_tools']}, got: {result['actual_tools']})"]
+            if result.get("error"):
+                parts.append(f"error={result['error']}")
+            if result.get("response_text"):
+                parts.append(f"reply={result['response_text'][:120]}")
+            print(" ".join(parts))
         time.sleep(1)  # Rate limiting
 
     return {
