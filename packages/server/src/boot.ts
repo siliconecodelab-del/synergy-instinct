@@ -119,6 +119,48 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   const instructions = syncInstructions(state, env.INSTINCT_INSTRUCTIONS);
   if (instructions === "created" || instructions === "updated") log(`${instructions} ${state.path("AGENTS.md")} from INSTINCT_INSTRUCTIONS`);
 
+  // Maritime env store may carry keys that were pushed after this container was
+  // created (e.g. BRAIN_REPO / GITHUB_TOKEN saved on the connect page). The
+  // gateway pushes them to Maritime's store and bounces the container, but a
+  // stop→start on an existing container does not re-apply store env — only a
+  // fresh create does. Since we can't force a recreate from inside the agent,
+  // fetch the current env from Maritime and merge any missing keys so the
+  // brain repo and token land on disk even for containers provisioned before
+  // the credentials existed.
+  if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY && !env.BRAIN_REPO) {
+    try {
+      const maritimeBase = env.MARITIME_API_URL ?? "https://api.maritime.sh";
+      const agentRes = await fetch(
+        `${maritimeBase}/api/agents?externalId=${encodeURIComponent(env.INKBOX_AGENT_ID)}`,
+        { headers: { Authorization: `Bearer ${env.MARITIME_API_KEY}`, Accept: "application/json" } },
+      );
+      if (agentRes.ok) {
+        const agents = (await agentRes.json()) as Array<{ id?: string }>;
+        const agent = agents?.[0];
+        if (agent?.id) {
+          const envRes = await fetch(
+            `${maritimeBase}/api/agents/${encodeURIComponent(agent.id)}/env`,
+            { headers: { Authorization: `Bearer ${env.MARITIME_API_KEY}`, Accept: "application/json" } },
+          );
+          if (envRes.ok) {
+            const rows = (await envRes.json()) as Array<{ key?: string; value?: string }>;
+            let merged = 0;
+            for (const row of rows) {
+              if (!row.key) continue;
+              if (!(row.key in process.env)) {
+                process.env[row.key] = row.value ?? "";
+                merged += 1;
+              }
+            }
+            if (merged > 0) log(`maritime env store merged ${merged} missing key(s) into process.env`);
+          }
+        }
+      }
+    } catch (err) {
+      log(`maritime env merge skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // Git/GitHub setup for company brain version control.
   // If BRAIN_REPO is set, ensure /data/brain is a git clone so the agent can
   // pull updates and push changes back via bash (git add/commit/push).

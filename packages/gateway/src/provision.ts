@@ -169,6 +169,7 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
     { key: "PORT", value: String(MARITIME_AGENT_PORT), isSecret: false },
     { key: "INKBOX_API_KEY", value: user.identityApiKey, isSecret: true },
     { key: "INKBOX_AGENT_HANDLE", value: user.handle, isSecret: false },
+    { key: "INKBOX_AGENT_ID", value: user.id, isSecret: false },
     { key: "INKBOX_IDENTITY_ID", value: user.identityId, isSecret: false },
     { key: "INSTINCT_OWNER_NAME", value: user.name, isSecret: false },
     { key: "INSTINCT_OWNER_PHONE", value: user.phone, isSecret: false },
