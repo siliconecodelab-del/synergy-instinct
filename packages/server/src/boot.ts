@@ -210,6 +210,41 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     log(`git: BRAIN_REPO set but no GITHUB_TOKEN; skipping git setup (read-only mirror via gateway push)`);
   }
 
+  // Import SOPs from the GitHub brain mirror (/data/brain/SOPs/) into the
+  // locally authored SOPs directory (/data/Company-brain/SOPs/) so they are
+  // discoverable by listSOPs(). Imported SOPs are never overwritten — existing
+  // authored SOPs in Company-brain take precedence (create-only semantics).
+  const brainSopsDir = state.path("brain", "SOPs");
+  const companySopsDir = state.path("Company-brain", "SOPs");
+  if (existsSync(brainSopsDir)) {
+    try {
+      const { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync: existsSyncFs } = await import("node:fs");
+      const { join } = await import("node:path");
+      mkdirSync(companySopsDir, { recursive: true });
+      const brainDepts = readdirSync(brainSopsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+      let imported = 0;
+      for (const dept of brainDepts) {
+        const companyDeptDir = join(companySopsDir, dept);
+        if (!existsSyncFs(companyDeptDir)) mkdirSync(companyDeptDir, { recursive: true });
+        const brainFiles = readdirSync(join(brainSopsDir, dept));
+        for (const file of brainFiles) {
+          if (!file.endsWith(".md")) continue;
+          const companyFile = join(companyDeptDir, file);
+          if (!existsSyncFs(companyFile)) {
+            const content = readFileSync(join(brainSopsDir, dept, file));
+            writeFileSync(companyFile, content);
+            imported += 1;
+          }
+        }
+      }
+      if (imported > 0) log(`imported ${imported} SOP(s) from /data/brain/SOPs/ to /data/Company-brain/SOPs/`);
+    } catch (err) {
+      log(`SOP import skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const audit = new AuditLog(state);
   const policy = new PolicyEngine(loadPolicy(state), {
     spentTodayUsd: () => audit.spentTodayUsd(config.owner.timezone),
