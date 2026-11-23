@@ -49,7 +49,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync, type ScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv, type LinkWalletLike, type PaymentsModule } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, platformApproveTool, platformOverrideTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry, type Telemetry, evaluateCondition, listSOPs, parseSOP, sopSlug, registerLoopTool } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, platformApproveTool, platformOverrideTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry, type Telemetry, evaluateCondition, listSOPs, parseSOP, sopSlug, registerLoopTool, sopCheckpointTool, sopBatchTool, sopFallbackTool } from "@open-instinct/agentrun";
 import type { Workflow } from "@parcha/agentrun-dsl";
 
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
@@ -700,6 +700,11 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
     registry.register(icmToDslTool({ stateDir: state }));
     registry.register(nudgeGateTool({ stateDir: state }));
     registry.register(registerLoopTool({ stateDir: state }));
+
+    // Execution-discipline tools: checkpoint, batch, fallback
+    registry.register(sopCheckpointTool({ stateDir: state }));
+    registry.register(sopBatchTool({ stateDir: state }));
+    registry.register(sopFallbackTool({ stateDir: state }));
 
     // Code-level pipeline store (no legacy migration; legacy records removed).
     const pipelineStore = new PipelineStore(state);

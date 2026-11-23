@@ -9,6 +9,7 @@ import { Type } from "typebox";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type RegisteredTool, type ToolResultLike, type ToolRegistry, Scheduler, parseCron, isValidTimeZone } from "@open-instinct/core";
+import { Scratchpad } from "./scratchpad.js";
 import { sopSlug } from "./sop-visualizer.js";
 import { createPlatformOverrideManager } from "@open-instinct/core";
 import {
@@ -1852,5 +1853,355 @@ export function sopOptimizeTool(deps: {
       return errResult(`Unknown action: ${a.action}`);
     },
   });
+}
+
+/**
+ * `sop_checkpoint` — idempotent execution checkpoint state via the agentrun
+ * scratchpad. Survives conversation restarts so progress is never lost.
+ *
+ * Actions:
+ * - record: write checkpoint state keyed by sop + item, including completed
+ *   count, current item, verified/resolved count, title-level count, unresolved
+ *   gaps, and timestamp.
+ * - read: return the latest checkpoint state for a given sop.
+ * - list: list all checkpoints across SOPs.
+ */
+export function sopCheckpointTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const { stateDir } = deps;
+  const scratchpad = new Scratchpad(stateDir);
+
+  return defineTool({
+    name: "sop_checkpoint",
+    label: "SOP Checkpoint",
+    description:
+      "Record or read idempotent execution checkpoint state for an SOP run via the " +
+      "agentrun scratchpad. Actions: record, read, list. Uses Scratchpad keys so " +
+      "state survives conversation restarts. Parameters: action, sop_title, " +
+      "target_department, item, completed, verified, titleLevel, unresolved, note.",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("record"),
+        Type.Literal("read"),
+        Type.Literal("list"),
+      ], { description: "record | read | list" }),
+      sop_title: Type.Optional(Type.String({ description: "SOP title." })),
+      target_department: Type.Optional(Type.String({ description: "Department." })),
+      item: Type.Optional(Type.String({ description: "Current work item (e.g. account name)." })),
+      completed: Type.Optional(Type.Number({ description: "Count of completed items." })),
+      verified: Type.Optional(Type.Number({ description: "Count of verified/resolved items." })),
+      titleLevel: Type.Optional(Type.Number({ description: "Count of title-level / partial items." })),
+      unresolved: Type.Optional(Type.Number({ description: "Count of unresolved gaps." })),
+      note: Type.Optional(Type.String({ description: "Free-form note for this checkpoint." })),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `sop_checkpoint ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args: any): Promise<ToolResultLike> => {
+      const a = args as {
+        action: "record" | "read" | "list";
+        sop_title?: string;
+        target_department?: string;
+        item?: string;
+        completed?: number;
+        verified?: number;
+        titleLevel?: number;
+        unresolved?: number;
+        note?: string;
+      };
+
+      if (a.action === "list") {
+        const keys = scratchpad.list().filter((k) => k.startsWith("sop-checkpoint:"));
+        if (keys.length === 0) return okResult("No checkpoints recorded.");
+        const lines = keys.map((k) => {
+          const entry = scratchpad.lookup<{
+            sop: string; item: string; completed: number; verified: number;
+            titleLevel: number; unresolved: number; note?: string; updatedAt: string;
+          }>(k);
+          return `${k} | ${entry?.sop ?? "?"} | item: ${entry?.item ?? "?"} | completed: ${entry?.completed ?? 0} | verified: ${entry?.verified ?? 0} | titleLevel: ${entry?.titleLevel ?? 0} | unresolved: ${entry?.unresolved ?? 0} | updated: ${entry?.updatedAt ?? "?"}`;
+        });
+        return okResult(lines.join("\n"));
+      }
+
+      if (!a.sop_title || !a.target_department) {
+        return errResult("sop_title and target_department are required.");
+      }
+
+      const key = `sop-checkpoint:${kebabCase(a.target_department)}:${kebabCase(a.sop_title)}`;
+
+      if (a.action === "read") {
+        const entry = scratchpad.lookup<{
+          sop: string; department: string; item: string; completed: number;
+          verified: number; titleLevel: number; unresolved: number; note?: string;
+          updatedAt: string;
+        }>(key);
+        if (!entry) return okResult(`No checkpoint found for SOP "${a.sop_title}" (${a.target_department}).`);
+        return okResult(
+          `Checkpoint for "${a.sop_title}" (${a.target_department}):\n` +
+          `  Current item: ${entry.item}\n` +
+          `  Completed: ${entry.completed}\n` +
+          `  Verified/resolved: ${entry.verified}\n` +
+          `  Title-level/partial: ${entry.titleLevel}\n` +
+          `  Unresolved gaps: ${entry.unresolved}\n` +
+          `  Updated: ${entry.updatedAt}` +
+          (entry.note ? `\n  Note: ${entry.note}` : ""),
+        );
+      }
+
+      // action === "record"
+      const now = new Date().toISOString();
+      const existing = scratchpad.lookup<{ completed: number }>(key);
+      const completed = a.completed ?? (existing ? existing.completed : 0);
+
+      scratchpad.record(key, {
+        sop: a.sop_title,
+        department: a.target_department,
+        item: a.item ?? "",
+        completed,
+        verified: a.verified ?? 0,
+        titleLevel: a.titleLevel ?? 0,
+        unresolved: a.unresolved ?? 0,
+        note: a.note,
+        updatedAt: now,
+      });
+
+      return okResult(
+        `Checkpoint recorded for "${a.sop_title}" (${a.target_department}):\n` +
+        `  Item: ${a.item ?? "(none)"}\n` +
+        `  Completed: ${completed}\n` +
+        `  Verified/resolved: ${a.verified ?? 0}\n` +
+        `  Title-level/partial: ${a.titleLevel ?? 0}\n` +
+        `  Unresolved gaps: ${a.unresolved ?? 0}\n` +
+        `  Recorded at: ${now}`,
+      );
+    },
+  });
+}
+
+/**
+ * `sop_batch` — ship ranked batches of completed items for an SOP run.
+ * Used by Hybrid SOPs to send partial results as items complete rather than
+ * waiting for all items. Records the batch via the scratchpad for idempotency.
+ *
+ * Actions:
+ * - record: save a batch with verified, title-level, and unresolved items.
+ * - read: return the latest batch for a given sop.
+ * - list: list all batches across SOPs.
+ */
+export function sopBatchTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const { stateDir } = deps;
+  const scratchpad = new Scratchpad(stateDir);
+
+  return defineTool({
+    name: "sop_batch",
+    label: "SOP Batch",
+    description:
+      "Record or read ranked batches of completed SOP items. Actions: record, " +
+      "read, list. Batches are shipped as items complete (ranked batches), not " +
+      "all-or-nothing. Parameters: action, sop_title, target_department, " +
+      "batchNumber, verifiedItems, titleLevelItems, unresolvedItems.",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("record"),
+        Type.Literal("read"),
+        Type.Literal("list"),
+      ], { description: "record | read | list" }),
+      sop_title: Type.Optional(Type.String({ description: "SOP title." })),
+      target_department: Type.Optional(Type.String({ description: "Department." })),
+      batchNumber: Type.Optional(Type.Number({ description: "Batch sequence number." })),
+      verifiedItems: Type.Optional(Type.Array(Type.String(), { description: "Verified item descriptions." })),
+      titleLevelItems: Type.Optional(Type.Array(Type.String(), { description: "Title-level / partial item descriptions." })),
+      unresolvedItems: Type.Optional(Type.Array(Type.String(), { description: "Unresolved gap descriptions." })),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `sop_batch ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args: any): Promise<ToolResultLike> => {
+      const a = args as {
+        action: "record" | "read" | "list";
+        sop_title?: string;
+        target_department?: string;
+        batchNumber?: number;
+        verifiedItems?: string[];
+        titleLevelItems?: string[];
+        unresolvedItems?: string[];
+      };
+
+      if (a.action === "list") {
+        const keys = scratchpad.list().filter((k) => k.startsWith("sop-batch:"));
+        if (keys.length === 0) return okResult("No batches recorded.");
+        const lines = keys.map((k) => {
+          const entry = scratchpad.lookup<{
+            sop: string; batchNumber: number; verifiedCount: number;
+            titleLevelCount: number; unresolvedCount: number; updatedAt: string;
+          }>(k);
+          return `${k} | ${entry?.sop ?? "?"} | batch: ${entry?.batchNumber ?? "?"} | verified: ${entry?.verifiedCount ?? 0} | titleLevel: ${entry?.titleLevelCount ?? 0} | unresolved: ${entry?.unresolvedCount ?? 0} | updated: ${entry?.updatedAt ?? "?"}`;
+        });
+        return okResult(lines.join("\n"));
+      }
+
+      if (!a.sop_title || !a.target_department || a.batchNumber === undefined) {
+        return errResult("sop_title, target_department, and batchNumber are required.");
+      }
+
+      const key = `sop-batch:${kebabCase(a.target_department)}:${kebabCase(a.sop_title)}:${a.batchNumber}`;
+
+      if (a.action === "read") {
+        const entry = scratchpad.lookup<{
+          sop: string; department: string; batchNumber: number;
+          verifiedItems: string[]; titleLevelItems: string[];
+          unresolvedItems: string[]; updatedAt: string;
+        }>(key);
+        if (!entry) return okResult(`No batch ${a.batchNumber} found for SOP "${a.sop_title}" (${a.target_department}).`);
+        const lines = [
+          `Batch ${entry.batchNumber} for "${entry.sop}" (${entry.department}):`,
+          `  Verified/resolved (${entry.verifiedItems.length}):`,
+          ...entry.verifiedItems.map((i) => `    - ${i}`),
+          `  Title-level/partial (${entry.titleLevelItems.length}):`,
+          ...entry.titleLevelItems.map((i) => `    - ${i}`),
+          `  Unresolved gaps (${entry.unresolvedItems.length}):`,
+          ...entry.unresolvedItems.map((i) => `    - ${i}`),
+          `  Updated: ${entry.updatedAt}`,
+        ];
+        return okResult(lines.join("\n"));
+      }
+
+      // action === "record"
+      const now = new Date().toISOString();
+      scratchpad.record(key, {
+        sop: a.sop_title,
+        department: a.target_department,
+        batchNumber: a.batchNumber,
+        verifiedItems: a.verifiedItems ?? [],
+        titleLevelItems: a.titleLevelItems ?? [],
+        unresolvedItems: a.unresolvedItems ?? [],
+        updatedAt: now,
+      });
+
+      const lines = [
+        `Batch ${a.batchNumber} recorded for "${a.sop_title}" (${a.target_department}):`,
+        `  Verified/resolved (${(a.verifiedItems ?? []).length}):`,
+        ...(a.verifiedItems ?? []).map((i) => `    - ${i}`),
+        `  Title-level/partial (${(a.titleLevelItems ?? []).length}):`,
+        ...(a.titleLevelItems ?? []).map((i) => `    - ${i}`),
+        `  Unresolved gaps (${(a.unresolvedItems ?? []).length}):`,
+        ...(a.unresolvedItems ?? []).map((i) => `    - ${i}`),
+        `  Recorded at: ${now}`,
+      ];
+      return okResult(lines.join("\n"));
+    },
+  });
+}
+
+/**
+ * `sop_fallback` — define and read a fallback hierarchy for an SOP stage when
+ * the primary tool/source is blocked (rate-limited, login wall, no accessible
+ * evidence). Prevents the agent from stalling the entire pipeline on one
+ * blocked item.
+ *
+ * Actions:
+ * - set: define the fallback order for a stage (primary + fallbacks).
+ * - read: return the fallback hierarchy for a stage.
+ * - list: list all fallback definitions across SOPs.
+ */
+export function sopFallbackTool(deps: { stateDir: StateDir }): RegisteredTool {
+  const { stateDir } = deps;
+  const scratchpad = new Scratchpad(stateDir);
+
+  return defineTool({
+    name: "sop_fallback",
+    label: "SOP Fallback Hierarchy",
+    description:
+      "Define or read a fallback hierarchy for an SOP stage when the primary " +
+      "tool/source is blocked. Actions: set, read, list. Parameters: action, " +
+      "sop_title, target_department, stage, primary, fallbacks.",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("set"),
+        Type.Literal("read"),
+        Type.Literal("list"),
+      ], { description: "set | read | list" }),
+      sop_title: Type.Optional(Type.String({ description: "SOP title." })),
+      target_department: Type.Optional(Type.String({ description: "Department." })),
+      stage: Type.Optional(Type.String({ description: "Stage name (e.g. buyer-resolution)." })),
+      primary: Type.Optional(Type.String({ description: "Primary tool/source (e.g. LinkedIn browser)." })),
+      fallbacks: Type.Optional(Type.Array(Type.String(), { description: "Fallback tools/sources in order (e.g. ['public web/company pages', 'Apollo', 'people search tools'])." })),
+    }),
+    meta: { capabilities: ["files.read", "files.write"], group: "files", describe: (a) => `sop_fallback ${(a as { action?: string }).action ?? ""}` },
+    execute: async (args: any): Promise<ToolResultLike> => {
+      const a = args as {
+        action: "set" | "read" | "list";
+        sop_title?: string;
+        target_department?: string;
+        stage?: string;
+        primary?: string;
+        fallbacks?: string[];
+      };
+
+      if (a.action === "list") {
+        const keys = scratchpad.list().filter((k) => k.startsWith("sop-fallback:"));
+        if (keys.length === 0) return okResult("No fallback hierarchies defined.");
+        const lines = keys.map((k) => {
+          const entry = scratchpad.lookup<{
+            sop: string; department: string; stage: string; primary: string;
+            fallbacks: string[]; updatedAt: string;
+          }>(k);
+          return `${k} | stage: ${entry?.stage ?? "?"} | primary: ${entry?.primary ?? "?"} | fallbacks: ${(entry?.fallbacks ?? []).join(" > ")} | updated: ${entry?.updatedAt ?? "?"}`;
+        });
+        return okResult(lines.join("\n"));
+      }
+
+      if (!a.sop_title || !a.target_department || !a.stage) {
+        return errResult("sop_title, target_department, and stage are required.");
+      }
+
+      const key = `sop-fallback:${kebabCase(a.target_department)}:${kebabCase(a.sop_title)}:${kebabCase(a.stage)}`;
+
+      if (a.action === "read") {
+        const entry = scratchpad.lookup<{
+          sop: string; department: string; stage: string; primary: string;
+          fallbacks: string[]; updatedAt: string;
+        }>(key);
+        if (!entry) return okResult(`No fallback hierarchy defined for stage "${a.stage}" in SOP "${a.sop_title}" (${a.target_department}).`);
+        return okResult(
+          `Fallback hierarchy for "${entry.stage}" in "${entry.sop}" (${entry.department}):\n` +
+          `  Primary: ${entry.primary}\n` +
+          `  Fallbacks: ${entry.fallbacks.join(" > ")}\n` +
+          `  Updated: ${entry.updatedAt}`,
+        );
+      }
+
+      // action === "set"
+      if (!a.primary || !a.fallbacks || a.fallbacks.length === 0) {
+        return errResult("primary and fallbacks (non-empty array) are required for action 'set'.");
+      }
+
+      const now = new Date().toISOString();
+      scratchpad.record(key, {
+        sop: a.sop_title,
+        department: a.target_department,
+        stage: a.stage,
+        primary: a.primary,
+        fallbacks: a.fallbacks,
+        updatedAt: now,
+      });
+
+      return okResult(
+        `Fallback hierarchy set for "${a.stage}" in "${a.sop_title}" (${a.target_department}):\n` +
+        `  Primary: ${a.primary}\n` +
+        `  Fallbacks: ${a.fallbacks.join(" > ")}\n` +
+        `  Set at: ${now}`,
+      );
+    },
+  });
+}
+
+/**
+ * Register the new execution-discipline tools. Call this from boot.ts alongside
+ * the other agentrun tool registrations.
+ */
+export function registerSopExecutionDisciplineTools(deps: {
+  stateDir: StateDir;
+}): RegisteredTool[] {
+  return [
+    sopCheckpointTool(deps),
+    sopBatchTool(deps),
+    sopFallbackTool(deps),
+  ];
 }
 

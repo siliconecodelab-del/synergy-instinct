@@ -23,7 +23,7 @@ import { appsNotConfiguredTool, setupSummaryFor } from "./setup-summary.js";
 import { createScheduleSync } from "./maritime-schedules.js";
 import { loadPaymentsModule, paymentsEnv } from "./payments.js";
 import { createSkillCatalog, formatSkillsIndex, loadSkillTool, ownerSkillsDir, resolveSkillsDir, skillsFor } from "./skills.js";
-import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, platformApproveTool, platformOverrideTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry } from "@open-instinct/agentrun";
+import { makeAdapters, agentrunTool, WorkflowStore, runWorkflowWithRecovery, sopArchitectTool, sopCheckRequiredToolsTool, sopResearchToolAlternativesTool, sopProactiveNudgeTool, sopVisualizeRoleMapTool, sopOptimizeTool, platformApproveTool, platformOverrideTool, workflowTraceTool, pipelineStatusTool, pipelinePrefsTool, pipelinePresetTool, pipelineScheduleTool, nudgeGateTool, icmToDslTool, PipelineStore, readPipelinePrefs, Scratchpad, initTelemetry, shutdownTelemetry, evaluateCondition, listSOPs, parseSOP, sopSlug, registerLoopTool, sopCheckpointTool, sopBatchTool, sopFallbackTool } from "@open-instinct/agentrun";
 /** How often the skill folders are re-read; an owner-installed skill shows up within this. */
 const SKILLS_REFRESH_MS = 30_000;
 export const DEFAULT_MARITIME_MCP_URL = "https://mcp.maritime.sh";
@@ -47,6 +47,44 @@ export async function boot(env, opts = {}) {
     const instructions = syncInstructions(state, env.INSTINCT_INSTRUCTIONS);
     if (instructions === "created" || instructions === "updated")
         log(`${instructions} ${state.path("AGENTS.md")} from INSTINCT_INSTRUCTIONS`);
+    // Maritime env store may carry keys that were pushed after this container was
+    // created (e.g. BRAIN_REPO / GITHUB_TOKEN saved on the connect page). The
+    // gateway pushes them to Maritime's store and bounces the container, but a
+    // stop→start on an existing container does not re-apply store env — only a
+    // fresh create does. Since we can't force a recreate from inside the agent,
+    // fetch the current env from Maritime and merge any missing keys so the
+    // brain repo and token land on disk even for containers provisioned before
+    // the credentials existed.
+    if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY && !env.BRAIN_REPO) {
+        try {
+            const maritimeBase = env.MARITIME_API_URL ?? "https://api.maritime.sh";
+            const agentRes = await fetch(`${maritimeBase}/api/agents?externalId=${encodeURIComponent(env.INKBOX_AGENT_ID)}`, { headers: { Authorization: `Bearer ${env.MARITIME_API_KEY}`, Accept: "application/json" } });
+            if (agentRes.ok) {
+                const agents = (await agentRes.json());
+                const agent = agents?.[0];
+                if (agent?.id) {
+                    const envRes = await fetch(`${maritimeBase}/api/agents/${encodeURIComponent(agent.id)}/env`, { headers: { Authorization: `Bearer ${env.MARITIME_API_KEY}`, Accept: "application/json" } });
+                    if (envRes.ok) {
+                        const rows = (await envRes.json());
+                        let merged = 0;
+                        for (const row of rows) {
+                            if (!row.key)
+                                continue;
+                            if (!(row.key in process.env)) {
+                                process.env[row.key] = row.value ?? "";
+                                merged += 1;
+                            }
+                        }
+                        if (merged > 0)
+                            log(`maritime env store merged ${merged} missing key(s) into process.env`);
+                    }
+                }
+            }
+        }
+        catch (err) {
+            log(`maritime env merge skipped: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
     // Git/GitHub setup for company brain version control.
     // If BRAIN_REPO is set, ensure /data/brain is a git clone so the agent can
     // pull updates and push changes back via bash (git add/commit/push).
@@ -549,7 +587,7 @@ export async function boot(env, opts = {}) {
             telemetry: agentrunTelemetry,
         });
         registry.register(agentrunTool({ store: agentrunStore, adapters: agentrunDeps, stateDir: state, registry }));
-        registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits }));
+        registry.register(sopArchitectTool({ stateDir: state, composio: apps, defaultTools: config.apps.toolkits, scheduler }));
         registry.register(sopCheckRequiredToolsTool({ stateDir: state, composio: apps }));
         registry.register(sopResearchToolAlternativesTool({ stateDir: state }));
         registry.register(sopProactiveNudgeTool({ stateDir: state, composio: apps }));
@@ -564,8 +602,24 @@ export async function boot(env, opts = {}) {
         registry.register(pipelineScheduleTool({ stateDir: state }));
         registry.register(icmToDslTool({ stateDir: state }));
         registry.register(nudgeGateTool({ stateDir: state }));
+        registry.register(registerLoopTool({ stateDir: state }));
+        // Execution-discipline tools: checkpoint, batch, fallback
+        registry.register(sopCheckpointTool({ stateDir: state }));
+        registry.register(sopBatchTool({ stateDir: state }));
+        registry.register(sopFallbackTool({ stateDir: state }));
         // Code-level pipeline store (no legacy migration; legacy records removed).
         const pipelineStore = new PipelineStore(state);
+        // Wire the condition evaluator for scheduled cron gating.
+        scheduler.setConditionEvaluator(async (entry) => {
+            if (!entry.condition)
+                return true;
+            return evaluateCondition(entry.condition, {
+                stateDir: state,
+                pipelineStore,
+                approvalStore: approvals,
+                auditLog: audit,
+            });
+        });
         // Auto-register the daily proactive SOP nudge schedule on first boot so nudges
         // do not depend on a manual enable_schedule call. Idempotent: an existing
         // entry with this name is left untouched.
@@ -583,6 +637,93 @@ export async function boot(env, opts = {}) {
         }
         catch (err) {
             log(`agentrun: failed to auto-register nudge schedule: ${err.message}`);
+        }
+        // Auto-register additional boot-time schedules for the loop capability.
+        // All are idempotent: existing entries with the same name are left untouched.
+        try {
+            if (!scheduler.list().some((e) => e.name === "pending-approvals-check")) {
+                scheduler.create({
+                    name: "pending-approvals-check",
+                    prompt: "Check for pending owner approvals older than 4 hours. If any exist, nudge the owner to review them.",
+                    enabled: true,
+                    cron: "0 */4 * * *",
+                    tz: "UTC",
+                    condition: "pending_approvals_older_than(4h) > 0",
+                });
+                log("agentrun: auto-registered pending approvals check schedule");
+            }
+        }
+        catch (err) {
+            log(`agentrun: failed to auto-register pending approvals check: ${err.message}`);
+        }
+        try {
+            if (!scheduler.list().some((e) => e.name === "weekly-sop-review")) {
+                scheduler.create({
+                    name: "weekly-sop-review",
+                    prompt: "Review all SOPs in Company-brain for disconnected Composio tools, stale schedules, and graduation candidates (Hybrid SOPs with 5+ consecutive checkpoint approvals). Surface any actionable findings to the owner.",
+                    enabled: true,
+                    cron: "0 10 * * 1",
+                    tz: "UTC",
+                    condition: "always",
+                });
+                log("agentrun: auto-registered weekly SOP review schedule");
+            }
+        }
+        catch (err) {
+            log(`agentrun: failed to auto-register weekly SOP review: ${err.message}`);
+        }
+        try {
+            if (!scheduler.list().some((e) => e.name === "nightly-sop-sync")) {
+                scheduler.create({
+                    name: "nightly-sop-sync",
+                    prompt: "Copy approved SOPs from Company-brain into /data/brain so they are included in the nightly GitHub brain push.",
+                    enabled: true,
+                    cron: "0 2 * * *",
+                    tz: "UTC",
+                    condition: "always",
+                });
+                log("agentrun: auto-registered nightly SOP sync schedule");
+            }
+        }
+        catch (err) {
+            log(`agentrun: failed to auto-register nightly SOP sync: ${err.message}`);
+        }
+        // Auto-register schedules declared in SOP frontmatter. Idempotent by cron name.
+        try {
+            const sopsDir = state.path("Company-brain", "SOPs");
+            if (existsSync(sopsDir)) {
+                const sopRelPaths = listSOPs(state);
+                for (const relPath of sopRelPaths) {
+                    try {
+                        const fullPath = join(sopsDir, relPath);
+                        if (!existsSync(fullPath))
+                            continue;
+                        const content = readFileSync(fullPath, "utf8");
+                        const doc = parseSOP(content);
+                        if (!doc || !doc.frontmatter.schedule)
+                            continue;
+                        const { schedule } = doc.frontmatter;
+                        const cronName = `sop-${sopSlug(doc.frontmatter.title)}`;
+                        if (scheduler.list().some((e) => e.name === cronName))
+                            continue;
+                        scheduler.create({
+                            name: cronName,
+                            prompt: schedule.prompt ?? `Run the SOP "${doc.frontmatter.title}".`,
+                            enabled: true,
+                            cron: schedule.cron,
+                            tz: schedule.tz ?? "UTC",
+                            condition: schedule.condition,
+                        });
+                        log(`agentrun: auto-registered SOP schedule "${cronName}"`);
+                    }
+                    catch {
+                        // Skip individual SOP parse errors; don't fail boot.
+                    }
+                }
+            }
+        }
+        catch (err) {
+            log(`agentrun: failed to auto-register SOP schedules: ${err.message}`);
         }
         // Inject the owner's pipeline mode preference into the AgentRun prompt so
         // the agent knows whether to auto-advance or confirm per stage.
