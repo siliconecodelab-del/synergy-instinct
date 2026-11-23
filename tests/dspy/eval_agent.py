@@ -2,22 +2,31 @@
 DsPy evaluation harness for Open Instinct agent behavior.
 
 Tests agent tool selection and permission boundaries by sending messages
-to the agent's HTTP API and checking which tools were actually invoked,
-as recorded in the per-turn traces (GET /agentrun/traces).
+to the agent's HTTP API and checking which tools were actually invoked.
+
+Tool invocation is read from the agent's telemetry JSONL
+(<stateDir>/eval/telemetry/YYYY-MM-DD.jsonl), which `recordToolCall` appends
+to synchronously during every tool call. Each eval case is sent with a unique
+`conversation_id` so its `conversationKey = chat:<case-id>` can be matched to
+the telemetry entries written during that turn.
 
 Usage:
     python eval_agent.py --url http://127.0.0.1:8099 --cases golden_cases.json
     python eval_agent.py --url http://127.0.0.1:8099 --cases golden_cases.json --output results.json
+    python eval_agent.py --url http://127.0.0.1:8099 --cases golden_cases.json --data-dir /tmp/instinct-eval
 
 Requirements:
     pip install dspy-ai requests
 """
 import argparse
+import glob
 import json
+import os
 import time
+from datetime import datetime, timezone
 import requests
 
-# Tools the agent may invoke; matched against trace tool_call entries.
+# Tools the agent may invoke; matched against telemetry tool names.
 API_TOOLS = [
     "generate_dynamic_sop",
     "sop_visualize_role_map",
@@ -27,14 +36,17 @@ API_TOOLS = [
 ]
 
 
-def send_message(url: str, message: str, chat_token: str | None = None, timeout: int = 60) -> dict:
+def send_message(url: str, message: str, chat_token: str | None = None, conversation_id: str | None = None, timeout: int = 60) -> dict:
     """Send a message to the agent and return the response."""
     headers = {"Content-Type": "application/json"}
     if chat_token:
         headers["x-instinct-token"] = chat_token
+    body = {"message": message}
+    if conversation_id:
+        body["conversation_id"] = conversation_id
     resp = requests.post(
         f"{url}/chat",
-        json={"message": message},
+        json=body,
         headers=headers,
         timeout=timeout,
     )
@@ -42,52 +54,49 @@ def send_message(url: str, message: str, chat_token: str | None = None, timeout:
     return resp.json()
 
 
-def fetch_traces(url: str, chat_token: str | None = None, timeout: int = 30) -> list:
-    """Fetch per-turn traces from the agent's /agentrun/traces endpoint.
+def read_telemetry(data_dir: str, since: str) -> list:
+    """Read telemetry JSONL entries written at or after `since`.
 
-    Requires INSTINCT_AGENTRUN=1 on the agent. Returns the raw trace list
-    (newest first) or [] if the endpoint is unavailable.
+    Returns entries (dicts) whose timestamp is >= `since`. Silently ignores
+    missing/unreadable telemetry directories.
     """
-    headers = {}
-    if chat_token:
-        headers["x-instinct-token"] = chat_token
-    try:
-        resp = requests.get(
-            f"{url.rstrip('/')}/agentrun/traces",
-            headers=headers,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
-    if not isinstance(data, dict):
-        return []
-    traces = data.get("traces")
-    return traces if isinstance(traces, list) else []
-
-
-def tools_from_traces(traces: list, conversation_key: str, input_text: str) -> list:
-    """Return the names of tools invoked in the trace matching this turn.
-
-    Traces are newest-first, so the first trace whose input conversation key
-    and text match this turn is the one we just produced. Falls back to []
-    when no matching trace is found (e.g. AgentRun traces not enabled).
-    """
-    for trace in traces:
-        if not isinstance(trace, dict):
+    entries = []
+    telemetry_dir = os.path.join(data_dir, "eval", "telemetry")
+    if not os.path.isdir(telemetry_dir):
+        return entries
+    for path in sorted(glob.glob(os.path.join(telemetry_dir, "*.jsonl"))):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("timestamp", "") >= since:
+                        entries.append(entry)
+        except OSError:
             continue
-        inp = trace.get("input") or {}
-        if inp.get("conversationKey") != conversation_key:
-            continue
-        if inp.get("text") != input_text:
-            continue
-        calls = trace.get("toolCalls") or []
-        return [c.get("tool") for c in calls if isinstance(c, dict) and c.get("tool")]
-    return []
+    return entries
 
 
-def evaluate_case(url: str, case: dict, chat_token: str | None = None) -> dict:
+def tools_from_telemetry(entries: list, conversation_key: str) -> list:
+    """Return tool names invoked for the given conversation key."""
+    tools = []
+    for entry in entries:
+        if entry.get("conversationKey") != conversation_key:
+            continue
+        tool = entry.get("tool")
+        if tool and tool in API_TOOLS:
+            tools.append(tool)
+    return tools
+
+
+def evaluate_case(url: str, case: dict, chat_token: str | None = None, data_dir: str = "/tmp/instinct-eval", since: str = "") -> dict:
     """Evaluate a single golden case."""
     result = {
         "id": case["id"],
@@ -100,15 +109,24 @@ def evaluate_case(url: str, case: dict, chat_token: str | None = None) -> dict:
     }
 
     try:
-        resp = send_message(url, case["input"], chat_token=chat_token)
-        conversation_key = resp.get("conversationKey", "")
+        conversation_id = case["id"]
+        conversation_key = f"chat:{conversation_id}"
+
+        # Timestamp just before the call: any telemetry written at/after this
+        # point for this conversation key belongs to this turn (and not to a
+        # previous nightly run, since conversation keys are stable across runs).
+        since = datetime.now(timezone.utc).isoformat()
+
+        resp = send_message(
+            url,
+            case["input"],
+            chat_token=chat_token,
+            conversation_id=conversation_id,
+        )
         response_text = resp.get("response", "")
 
-        # The assistant's natural-language reply is not a reliable signal of
-        # which tools ran; the per-turn traces record every tool_call by name.
-        traces = fetch_traces(url, chat_token=chat_token)
-        actual_tools = [t for t in tools_from_traces(traces, conversation_key, case["input"])
-                        if t in API_TOOLS]
+        entries = read_telemetry(data_dir, since)
+        actual_tools = tools_from_telemetry(entries, conversation_key)
 
         expected_tool = case.get("expected_tool")
         expected_tools_seq = case.get("expected_tools_sequence", [])
@@ -151,7 +169,7 @@ def evaluate_case(url: str, case: dict, chat_token: str | None = None) -> dict:
     return result
 
 
-def run_evaluation(url: str, cases_path: str, chat_token: str | None = None) -> dict:
+def run_evaluation(url: str, cases_path: str, chat_token: str | None = None, data_dir: str = "/tmp/instinct-eval") -> dict:
     """Run the full evaluation suite."""
     with open(cases_path) as f:
         cases = json.load(f)
@@ -162,7 +180,7 @@ def run_evaluation(url: str, cases_path: str, chat_token: str | None = None) -> 
 
     for case in cases:
         print(f"  Evaluating: {case['id']}...", end=" ", flush=True)
-        result = evaluate_case(url, case, chat_token=chat_token)
+        result = evaluate_case(url, case, chat_token=chat_token, data_dir=data_dir)
         results.append(result)
         if result["passed"]:
             passed += 1
@@ -187,13 +205,19 @@ def main():
     parser.add_argument("--cases", default="golden_cases.json", help="Path to golden cases JSON")
     parser.add_argument("--output", default=None, help="Output results JSON path")
     parser.add_argument("--chat-token", default=None, help="INSTINCT_CHAT_TOKEN for /chat auth")
+    parser.add_argument(
+        "--data-dir",
+        default=os.environ.get("INSTINCT_DATA_DIR", "/tmp/instinct-eval"),
+        help="Agent data dir containing eval/telemetry JSONL (default: INSTINCT_DATA_DIR or /tmp/instinct-eval)",
+    )
     args = parser.parse_args()
 
     print(f"Evaluating agent at {args.url}")
     print(f"Cases: {args.cases}")
+    print(f"Telemetry data dir: {args.data_dir}")
     print()
 
-    report = run_evaluation(args.url, args.cases, chat_token=args.chat_token)
+    report = run_evaluation(args.url, args.cases, chat_token=args.chat_token, data_dir=args.data_dir)
 
     print()
     print(f"Results: {report['passed']}/{report['total']} passed ({report['accuracy']:.1%})")

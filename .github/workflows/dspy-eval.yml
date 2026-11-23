@@ -50,11 +50,13 @@ jobs:
 
       - name: Run DsPy evaluation
         run: |
+          export INSTINCT_DATA_DIR=/tmp/instinct-eval
           python tests/dspy/eval_agent.py \
             --url http://127.0.0.1:8099 \
             --cases tests/dspy/golden_cases.json \
             --output /tmp/eval-results.json \
-            --chat-token "eval-chat-token-12345"
+            --chat-token "eval-chat-token-12345" \
+            --data-dir /tmp/instinct-eval
 
       - name: Upload results
         if: always()
