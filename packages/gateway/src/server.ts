@@ -527,6 +527,13 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       // Re-push the company brain so a repo added/changed since provisioning lands.
       if (healed.brainRepo && healed.maritimeAgentId) {
         const agentId = healed.maritimeAgentId;
+        // Ensure the agent is awake before pushing files — a stopped agent
+        // rejects file writes with "Agent is stopped. Start it first."
+        try {
+          await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "POST", `/api/agents/${encodeURIComponent(agentId)}/start`);
+        } catch (startErr) {
+          // Already running — ignore
+        }
         try {
           await pushBrain(healed.brainRepo, healed.brainToken, {
             fetchImpl: opts.fetchImpl,
@@ -666,6 +673,12 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
       const agentId = next.maritimeAgentId;
       void (async () => {
         if (repo) {
+          // Ensure the agent is awake before pushing files.
+          try {
+            await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "POST", `/api/agents/${encodeURIComponent(agentId)}/start`);
+          } catch (startErr) {
+            // Already running — ignore
+          }
           try {
             const r = await pushBrain(repo, next.brainToken, {
               fetchImpl: opts.fetchImpl,

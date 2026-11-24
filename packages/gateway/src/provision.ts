@@ -565,16 +565,26 @@ export async function provisionUser(input: ProvisionInput, deps: ProvisionDeps):
     // repo added after the first provision) lands on the next reconnect.
     if (user.brainRepo) {
       const agentId = user.maritimeAgentId;
-      void pushBrain(user.brainRepo, user.brainToken, {
-        fetchImpl: deps.fetchImpl,
-        githubToken: deps.githubToken,
-        logger: log,
-        write: async (path, content) => {
-          await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-        },
-      }).catch((err: unknown) =>
-        log.warn("provision.brain_failed", { userId: user.id, repo: user.brainRepo, error: err instanceof Error ? err.message : String(err) }),
-      );
+      // Ensure the agent is awake before pushing files.
+      void (async () => {
+        try {
+          await maritimeRequest(deps, "POST", `/api/agents/${encodeURIComponent(agentId)}/start`);
+        } catch (startErr) {
+          // Already running — ignore
+        }
+        try {
+          await pushBrain(user.brainRepo!, user.brainToken, {
+            fetchImpl: deps.fetchImpl,
+            githubToken: deps.githubToken,
+            logger: log,
+            write: async (path, content) => {
+              await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+            },
+          });
+        } catch (err: unknown) {
+          log.warn("provision.brain_failed", { userId: user.id, repo: user.brainRepo, error: err instanceof Error ? err.message : String(err) });
+        }
+      })();
     }
     void healPostizAccount(user, deps, store, log);
     void healOxygenAccount(user, deps, store, log)

@@ -5,6 +5,8 @@ export const BRAIN_MAX_FILE_BYTES = 90 * 1024; // ~90 KB; Maritime files/write c
 export const BRAIN_MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 /** Where pushed brain files land inside the agent's persistent volume. */
 export const BRAIN_ROOT = "/data/brain";
+/** Where SOPs are authored/discoverable by listSOPs(). */
+export const COMPANY_BRAIN_ROOT = "/data/Company-brain";
 const SKIP_DIR_RE = /(^|\/)(\.git|node_modules|dist|build|\.next|vendor|\.venv|venv|__pycache__|coverage)(\/|$)/i;
 /** Never read or push credential-shaped files, whatever the repo says. */
 const DENY_RE = /(^|\/)(\.env($|\..*)|.*\.(pem|key|p12|pfx|jks|keystore)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?)$/i;
@@ -158,6 +160,19 @@ export async function pushBrain(repo, token, deps) {
         catch (err) {
             skipped++;
             log.warn("brain.write_failed", { repo, path, error: err instanceof Error ? err.message : String(err) });
+            continue;
+        }
+        // Also push SOP files to Company-brain so they're discoverable by listSOPs().
+        // The agent's listSOPs() only reads /data/Company-brain/SOPs/, but pushBrain
+        // writes to /data/brain/SOPs/ (the GitHub mirror). Without this sync, SOPs
+        // imported from the brain repo are invisible to the agent's SOP discovery.
+        if (path.startsWith("SOPs/") && path.endsWith(".md")) {
+            try {
+                await deps.write(`${COMPANY_BRAIN_ROOT}/${path}`, text);
+            }
+            catch (err) {
+                log.warn("brain.company_write_failed", { repo, path, error: err instanceof Error ? err.message : String(err) });
+            }
         }
     }
     log.info("brain.pushed", { repo, written, skipped, bytes: total });

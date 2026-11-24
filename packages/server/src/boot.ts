@@ -127,7 +127,7 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
   // fetch the current env from Maritime and merge any missing keys so the
   // brain repo and token land on disk even for containers provisioned before
   // the credentials existed.
-  if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY && !env.BRAIN_REPO) {
+  if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY) {
     try {
       const maritimeBase = env.MARITIME_API_URL ?? "https://api.maritime.sh";
       const agentRes = await fetch(
@@ -905,7 +905,27 @@ export async function boot(env: NodeJS.ProcessEnv, opts: BootOptions = {}): Prom
       "/agentrun/scratchpad. When you find yourself doing the same multi-step procedure more than once, " +
       "author it as an AgentRun DSL workflow (`agentrun` action='save'), give it a preflight ICM trace " +
       "if it touches a folder workspace, and run it with `agentrun` action='run' so it is checkpointed, " +
-      "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.",
+      "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.\n\n" +
+      "# SOP Execution Discipline — Proactive Checkpoints\n" +
+      "When executing a Hybrid SOP's agent-owned steps (e.g. Steps 4–13), you MUST proactively push " +
+      "progress to the owner. Never make the owner ask \"any progress?\" and never reply with just \"On it...\"\n" +
+      "\n" +
+      "1. Before starting agent-owned steps, call `sop_checkpoint` (action='record') with initial state: " +
+      "completed=0, current item = first work item, verified=0, titleLevel=0, unresolved=total items. " +
+      "Then message the owner with concrete numbers.\n" +
+      "2. After completing each agent step, call `sop_checkpoint` (action='record') with updated counts " +
+      "and message the owner: \"Step N complete: <item> — <verified> verified, <titleLevel> title-level, " +
+      "<unresolved> unresolved. Moving to <next item>.\"\n" +
+      "3. Ship ranked partial batches incrementally via `sop_batch` (action='record') as items complete — " +
+      "do not wait for all items to finish before sending anything.\n" +
+      "4. When your primary source/tool is blocked (rate-limited, not a login wall), call `sop_fallback` " +
+      "(action='set' if not already defined, then action='read') and proceed down the fallback hierarchy " +
+      "(e.g. LinkedIn browser → public web/company pages → Apollo/people search tools). Do not stall.\n" +
+      "5. At login walls, keep current behavior — do not fall back past the wall.\n" +
+      "6. The owner's human checkpoints (e.g. Steps 1, 2, 3, 14 in a Hybrid SOP) still require explicit " +
+      "owner approval before you continue. Agent-owned steps run autonomously but must be checkpointed.\n" +
+      "7. Every status message must contain concrete numbers (N/M completed, counts per category). No vague " +
+      "status like \"still working\" or \"behind.\"\n",
     );
   }
 

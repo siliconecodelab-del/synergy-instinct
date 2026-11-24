@@ -55,7 +55,7 @@ export async function boot(env, opts = {}) {
     // fetch the current env from Maritime and merge any missing keys so the
     // brain repo and token land on disk even for containers provisioned before
     // the credentials existed.
-    if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY && !env.BRAIN_REPO) {
+    if (env.INKBOX_AGENT_ID && env.MARITIME_API_KEY) {
         try {
             const maritimeBase = env.MARITIME_API_URL ?? "https://api.maritime.sh";
             const agentRes = await fetch(`${maritimeBase}/api/agents?externalId=${encodeURIComponent(env.INKBOX_AGENT_ID)}`, { headers: { Authorization: `Bearer ${env.MARITIME_API_KEY}`, Accept: "application/json" } });
@@ -138,6 +138,44 @@ export async function boot(env, opts = {}) {
     }
     else if (env.BRAIN_REPO) {
         log(`git: BRAIN_REPO set but no GITHUB_TOKEN; skipping git setup (read-only mirror via gateway push)`);
+    }
+    // Import SOPs from the GitHub brain mirror (/data/brain/SOPs/) into the
+    // locally authored SOPs directory (/data/Company-brain/SOPs/) so they are
+    // discoverable by listSOPs(). Imported SOPs are never overwritten — existing
+    // authored SOPs in Company-brain take precedence (create-only semantics).
+    const brainSopsDir = state.path("brain", "SOPs");
+    const companySopsDir = state.path("Company-brain", "SOPs");
+    if (existsSync(brainSopsDir)) {
+        try {
+            const { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync: existsSyncFs } = await import("node:fs");
+            const { join } = await import("node:path");
+            mkdirSync(companySopsDir, { recursive: true });
+            const brainDepts = readdirSync(brainSopsDir, { withFileTypes: true })
+                .filter((d) => d.isDirectory())
+                .map((d) => d.name);
+            let imported = 0;
+            for (const dept of brainDepts) {
+                const companyDeptDir = join(companySopsDir, dept);
+                if (!existsSyncFs(companyDeptDir))
+                    mkdirSync(companyDeptDir, { recursive: true });
+                const brainFiles = readdirSync(join(brainSopsDir, dept));
+                for (const file of brainFiles) {
+                    if (!file.endsWith(".md"))
+                        continue;
+                    const companyFile = join(companyDeptDir, file);
+                    if (!existsSyncFs(companyFile)) {
+                        const content = readFileSync(join(brainSopsDir, dept, file));
+                        writeFileSync(companyFile, content);
+                        imported += 1;
+                    }
+                }
+            }
+            if (imported > 0)
+                log(`imported ${imported} SOP(s) from /data/brain/SOPs/ to /data/Company-brain/SOPs/`);
+        }
+        catch (err) {
+            log(`SOP import skipped: ${err instanceof Error ? err.message : String(err)}`);
+        }
     }
     const audit = new AuditLog(state);
     const policy = new PolicyEngine(loadPolicy(state), {
@@ -767,7 +805,27 @@ export async function boot(env, opts = {}) {
             "/agentrun/scratchpad. When you find yourself doing the same multi-step procedure more than once, " +
             "author it as an AgentRun DSL workflow (`agentrun` action='save'), give it a preflight ICM trace " +
             "if it touches a folder workspace, and run it with `agentrun` action='run' so it is checkpointed, " +
-            "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.");
+            "recoverable, and auditable. Do not repeat ad-hoc tool chains — capture them as workflows.\n\n" +
+            "# SOP Execution Discipline — Proactive Checkpoints\n" +
+            "When executing a Hybrid SOP's agent-owned steps (e.g. Steps 4–13), you MUST proactively push " +
+            "progress to the owner. Never make the owner ask \"any progress?\" and never reply with just \"On it...\"\n" +
+            "\n" +
+            "1. Before starting agent-owned steps, call `sop_checkpoint` (action='record') with initial state: " +
+            "completed=0, current item = first work item, verified=0, titleLevel=0, unresolved=total items. " +
+            "Then message the owner with concrete numbers.\n" +
+            "2. After completing each agent step, call `sop_checkpoint` (action='record') with updated counts " +
+            "and message the owner: \"Step N complete: <item> — <verified> verified, <titleLevel> title-level, " +
+            "<unresolved> unresolved. Moving to <next item>.\"\n" +
+            "3. Ship ranked partial batches incrementally via `sop_batch` (action='record') as items complete — " +
+            "do not wait for all items to finish before sending anything.\n" +
+            "4. When your primary source/tool is blocked (rate-limited, not a login wall), call `sop_fallback` " +
+            "(action='set' if not already defined, then action='read') and proceed down the fallback hierarchy " +
+            "(e.g. LinkedIn browser → public web/company pages → Apollo/people search tools). Do not stall.\n" +
+            "5. At login walls, keep current behavior — do not fall back past the wall.\n" +
+            "6. The owner's human checkpoints (e.g. Steps 1, 2, 3, 14 in a Hybrid SOP) still require explicit " +
+            "owner approval before you continue. Agent-owned steps run autonomously but must be checkpointed.\n" +
+            "7. Every status message must contain concrete numbers (N/M completed, counts per category). No vague " +
+            "status like \"still working\" or \"behind.\"\n");
     }
     // Agent snapshot for template creation (INSTINCT_AGENTRUN=1).
     // Exposes the agent's config, persona, instructions and skills so the owner
@@ -870,7 +928,7 @@ export async function boot(env, opts = {}) {
 export const PROVIDER_KEY_ENV = {
     "anthropic": ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"],
     "openai": ["OPENAI_API_KEY"],
-    "openai-compatible": ["OPENAI_API_KEY"],
+    "openai-compatible": ["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
     "openai-codex": ["OPENAI_API_KEY"],
     "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
     "google-gemini-cli": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],

@@ -5,6 +5,8 @@ export declare const BRAIN_MAX_FILE_BYTES: number;
 export declare const BRAIN_MAX_TOTAL_BYTES: number;
 /** Where pushed brain files land inside the agent's persistent volume. */
 export declare const BRAIN_ROOT = "/data/brain";
+/** Where SOPs are authored/discoverable by listSOPs(). */
+export declare const COMPANY_BRAIN_ROOT = "/data/Company-brain";
 /**
  * Accept `owner/repo`, a github.com URL, or a URL with `/tree/<branch>` and
  * return the canonical `owner/repo`. Anything else returns undefined; callers
