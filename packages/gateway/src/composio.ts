@@ -11,6 +11,8 @@ export const OXYGEN_MCP_URL = "https://oxygen-agent.com/mcp";
 export const OXYGEN_DISCOVERY_URL = "https://oxygen-agent.com/.well-known/oauth-authorization-server";
 /** Linear: a Composio-managed toolkit. Nothing to register at boot; each person connects their own account. */
 export const LINEAR_TOOLKIT_NAME = "linear";
+/** Apollo: a Composio-managed toolkit. Nothing to register at boot; each person connects their own account. */
+export const APOLLO_TOOLKIT_NAME = "apollo";
 /** Postiz: custom toolkit over an MCP wrapper around the self-hosted Postiz public API. */
 export const POSTIZ_TOOLKIT_SLUG = "CUSTOM_POSTIZ";
 export const POSTIZ_TOOLKIT_NAME = "custom_postiz";

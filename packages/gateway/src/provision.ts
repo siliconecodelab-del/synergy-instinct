@@ -16,7 +16,7 @@ export const DEFAULT_IDLE_TTL_SECONDS = 900;
  */
 export const MARITIME_AGENT_PORT = 18789;
 /** Matches deploy/.env.example and core's DEFAULT_TOOLKITS. Linear is Composio-managed; custom_oxygen is the gateway's DCR toolkit. */
-export const DEFAULT_COMPOSIO_TOOLKITS = "gmail,googlecalendar,googlecontacts,linear,custom_oxygen";
+export const DEFAULT_COMPOSIO_TOOLKITS = "gmail,googlecalendar,googlecontacts,linear,apollo,custom_oxygen";
 /** A model id Maritime's metered OpenAI-compatible proxy serves. Override with INSTINCT_MARITIME_MODEL. */
 export const DEFAULT_MARITIME_LLM_MODEL = "gpt-5.4";
 

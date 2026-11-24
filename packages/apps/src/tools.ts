@@ -52,7 +52,7 @@ function listTool({ apps }: AppsToolDeps): RegisteredTool {
 
 const CONNECT_PARAMS = Type.Object({
   toolkit: Type.String({
-    description: "Toolkit slug, lowercase, for example gmail, notion, slack, github, linear, hubspot.",
+    description: "Toolkit slug, lowercase, for example gmail, notion, slack, github, linear, apollo, hubspot.",
   }),
 });
 

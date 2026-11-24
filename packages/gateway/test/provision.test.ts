@@ -105,7 +105,7 @@ describe("provisionUser", () => {
     expect(byKey["COMPOSIO_API_KEY"]).toMatchObject({ isSecret: true });
     // Without COMPOSIO_TOOLKITS core keeps apps disabled, so the key alone would be useless.
     // No platform here, so the gateway-managed custom_oxygen is stripped from the default.
-    expect(byKey["COMPOSIO_TOOLKITS"]).toEqual({ key: "COMPOSIO_TOOLKITS", value: "gmail,googlecalendar,googlecontacts,linear", isSecret: false });
+    expect(byKey["COMPOSIO_TOOLKITS"]).toEqual({ key: "COMPOSIO_TOOLKITS", value: "gmail,googlecalendar,googlecontacts,linear,apollo", isSecret: false });
     expect(byKey["INSTINCT_COMPUTER"]?.value).toBe("auto");
     expect(byKey["INSTINCT_MODEL"]).toMatchObject({ isSecret: false });
     expect(byKey["EXTRA_TOKEN"]).toMatchObject({ isSecret: true });
@@ -256,8 +256,8 @@ describe("templates in provisioning", () => {
     expect(byKey["INSTINCT_INSTRUCTIONS"]).toContain("explicit approval");
     // The template's model wins over the fleet maritime-llm model.
     expect(byKey["INSTINCT_MODEL"]).toBe("openai-compatible/gpt-5.4");
-    // No composio platform here: the gateway-managed custom toolkits are stripped, linear stays.
-    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,linear");
+    // No composio platform here: the gateway-managed custom toolkits are stripped; linear and apollo are Composio-managed and stay.
+    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,linear,apollo");
   });
 
   it("default template provisions desktop-less with TEMPLATE_ID but no persona", async () => {
@@ -314,12 +314,12 @@ describe("executor wiring", () => {
   it("computes the effective toolkit list and detects an executor request", () => {
     const gtm = shipped.resolve("gtm-ai");
     expect(executorRequested({ template: gtm })).toBe(true);
-    expect(effectiveToolkits({ template: gtm })).toBe("gmail,googlecalendar,custom_executor,linear,custom_oxygen");
+    expect(effectiveToolkits({ template: gtm })).toBe("gmail,googlecalendar,custom_executor,linear,apollo,custom_oxygen");
     expect(executorRequested({ template: shipped.resolve("default") })).toBe(false);
     expect(executorRequested({ composioToolkits: "custom_executor,gmail" })).toBe(true);
     expect(executorRequested({ composioToolkits: "gmail,googlecalendar" })).toBe(false);
     expect(effectiveToolkits({ composioToolkits: "gmail, slack" })).toBe("gmail, slack");
-    expect(effectiveToolkits({})).toBe("gmail,googlecalendar,googlecontacts,linear,custom_oxygen");
+    expect(effectiveToolkits({})).toBe("gmail,googlecalendar,googlecontacts,linear,apollo,custom_oxygen");
   });
 
   it("strips gateway-managed toolkits that never booted from the agent env", async () => {
@@ -327,8 +327,8 @@ describe("executor wiring", () => {
     await provisionUser(input, { ...d.deps, template: shipped.resolve("gtm-ai") });
     const body = d.mar.calls.find((c) => c.method === "POST" && c.url.endsWith("/api/agents"))?.body as Record<string, unknown>;
     const byKey = Object.fromEntries((body["initialEnvVars"] as Array<{ key: string; value: string }>).map((e) => [e.key, e.value]));
-    // custom_executor and custom_oxygen need gateway boot state; linear is Composio-managed and stays.
-    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,linear");
+    // custom_executor and custom_oxygen need gateway boot state; linear and apollo are Composio-managed and stay.
+    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,linear,apollo");
     expect(byKey["COMPOSIO_MODE"]).toBe("router");
   });
 
@@ -340,7 +340,7 @@ describe("executor wiring", () => {
     const byKey = Object.fromEntries((body["initialEnvVars"] as Array<{ key: string; value: string }>).map((e) => [e.key, e.value]));
     // The executor account mints during this provision; Oxygen needs the person's
     // own OAuth dance, which has not happened for a brand-new record.
-    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,custom_executor,linear");
+    expect(byKey["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,custom_executor,linear,apollo");
   });
 
   it("adds custom_oxygen to the toolkit list only when the person finished connecting", async () => {
@@ -640,9 +640,9 @@ describe("syncAgentEnv", () => {
     expect(pushedKeys).not.toContain("PORT"); // already matches, not re-pushed
     // With no composio platform in deps, gateway-managed toolkits (executor,
     // oxygen) are stripped by the flag-based strip — only Composio-managed ones
-    // (gmail, calendar, linear) survive. Working as designed, not a sync bug.
+    // (gmail, calendar, linear, apollo) survive. Working as designed, not a sync bug.
     const toolkits = d.mar.env[ready.maritimeAgentId!].find((r) => r.key === "COMPOSIO_TOOLKITS");
-    expect(toolkits?.value).toBe("gmail,googlecalendar,linear");
+    expect(toolkits?.value).toBe("gmail,googlecalendar,linear,apollo");
   });
 
   it("re-pushes a secret even when Maritime already has one (masked value is untrustworthy)", async () => {

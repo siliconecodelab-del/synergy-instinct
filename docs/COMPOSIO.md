@@ -89,7 +89,7 @@ The same text works for any app. What the owner can say, and what the agent does
 If an app is not in the toolkit list, `apps_connect` says so and names the fix:
 add the slug to `COMPOSIO_TOOLKITS`, or set `COMPOSIO_TOOLKITS=all`. The slug is
 the app's name in Composio's catalog, lowercase: `gmail`, `googlecalendar`,
-`googlecontacts`, `notion`, `slack`, `github`, `linear`, `hubspot`, and so on.
+`googlecontacts`, `notion`, `slack`, `github`, `linear`, `apollo`, `hubspot`, and so on.
 
 Only the owner can connect or disconnect an app. `apps_connect` refuses every other
 caller on its own, before the policy engine even looks. If a partner or a friend
