@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { InkboxProvisioner } from "@open-instinct/inkbox";
-import { DEFAULT_MARITIME_LLM_MODEL, MARITIME_AGENT_PORT, agentEnvFor, effectiveToolkits, executorRequested, healOxygenAccount, linkRedirectUriFor, maritimeCreateBody, provisionUser, syncAgentEnv, webhookUrlFor } from "../src/provision.js";
+import { DEFAULT_MARITIME_LLM_MODEL, MARITIME_AGENT_PORT, agentEnvFor, agentFileWriter, effectiveToolkits, executorRequested, healOxygenAccount, linkRedirectUriFor, maritimeCreateBody, provisionUser, syncAgentEnv, webhookUrlFor } from "../src/provision.js";
 import type { ComposioPlatform } from "../src/composio.js";
+import { silentLogger } from "../src/logger.js";
 import { UserStore } from "../src/store.js";
 import { loadTemplateRegistry } from "../src/templates.js";
 import { fakeInkbox, fakeMaritime, readyUser, tempDir } from "./helpers.js";
@@ -709,5 +710,80 @@ describe("syncAgentEnv", () => {
     // Both calls were attempted; the start failure only logs a warning.
     expect(d.mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/stop"))).toBe(true);
     expect(d.mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/start"))).toBe(true);
+  });
+});
+
+describe("agentFileWriter", () => {
+  /** A files/write stub over fakeMaritime: answers the first `failures` PUTs, then succeeds. */
+  function writerHarness(failures: number, status409: { detail: string; onFail?: () => void }) {
+    const mar = fakeMaritime();
+    const inner = mar.fetch;
+    let attempts = 0;
+    mar.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "PUT" && String(input).includes("/files/write")) {
+        attempts++;
+        if (attempts <= failures) {
+          status409.onFail?.();
+          return new Response(JSON.stringify({ detail: status409.detail }), { status: 409 });
+        }
+        return new Response(null, { status: 200 });
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    const write = agentFileWriter({ maritime: { apiKey: "mk_test", baseUrl: "https://maritime.test" }, fetchImpl: mar.fetch }, "agt_w", silentLogger);
+    return { mar, write, attempts: () => attempts };
+  }
+
+  it("waits out a deploying agent instead of dropping the write", async () => {
+    const h = writerHarness(1, {
+      detail: "Agent is deploying. Wait for deployment to finish.",
+      // The deploy finishes while the writer is waiting on the status poll.
+      onFail: () => {
+        h.mar.agentStatus["agt_w"] = "active";
+      },
+    });
+    h.mar.agentStatus["agt_w"] = "deploying";
+    await h.write("/data/Company-brain/SOPs/GTM-mvp-playbook/sop.md", "body");
+    expect(h.attempts()).toBe(2);
+    expect(h.mar.calls.some((c) => c.method === "GET" && c.url.endsWith("/api/agents/agt_w"))).toBe(true);
+  });
+
+  it("starts a stopped agent before retrying the rejected write", async () => {
+    const h = writerHarness(1, { detail: "Agent is stopped. Start it first." });
+    h.mar.agentStatus["agt_w"] = "stopped";
+    await h.write("/data/brain/NOTES.md", "hello");
+    expect(h.attempts()).toBe(2);
+    expect(h.mar.calls.some((c) => c.method === "POST" && c.url.endsWith("/api/agents/agt_w/start"))).toBe(true);
+    expect(h.mar.agentStatus["agt_w"]).toBe("active");
+  });
+
+  it("fails fast for the rest of the push once the wait budget is exhausted", async () => {
+    const h = writerHarness(99, { detail: "Agent is deploying. Wait for deployment to finish." });
+    h.mar.agentStatus["agt_w"] = "deploying";
+    const write = agentFileWriter({ maritime: { apiKey: "mk_test", baseUrl: "https://maritime.test" }, fetchImpl: h.mar.fetch }, "agt_w", silentLogger, {
+      readyTimeoutMs: 10,
+      readyPollMs: 5,
+    });
+    await expect(write("/data/brain/a.md", "1")).rejects.toThrow(/Agent is deploying/);
+    expect(h.attempts()).toBe(1);
+    // The writer is blocked now: the next file does not even hit Maritime.
+    await expect(write("/data/brain/b.md", "2")).rejects.toThrow(/never became writable/);
+    expect(h.attempts()).toBe(1);
+  });
+
+  it("does not retry a non-409 failure", async () => {
+    const mar = fakeMaritime();
+    const inner = mar.fetch;
+    let attempts = 0;
+    mar.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "PUT" && String(input).includes("/files/write")) {
+        attempts++;
+        return new Response(JSON.stringify({ detail: "vm still deploying" }), { status: 503 });
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    const write = agentFileWriter({ maritime: { apiKey: "mk_test", baseUrl: "https://maritime.test" }, fetchImpl: mar.fetch }, "agt_w", silentLogger);
+    await expect(write("/data/brain/a.md", "1")).rejects.toThrow(/503/);
+    expect(attempts).toBe(1);
   });
 });

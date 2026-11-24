@@ -1,7 +1,7 @@
 import { encodeEvent } from "@open-instinct/core";
 import { verifyInkboxSignature } from "@open-instinct/inkbox";
 import { type Logger, silentLogger } from "./logger.js";
-import { DEFAULT_MARITIME_BASE_URL } from "./provision.js";
+import { AGENT_NOT_READY, DEFAULT_MARITIME_BASE_URL } from "./provision.js";
 import type { UserRecord } from "./store.js";
 
 export type HeaderMap = Record<string, string | string[] | undefined>;
@@ -124,14 +124,13 @@ export async function relayEvent(user: UserRecord, rawBody: Buffer, headers: Hea
 }
 
 /** Replay an event whose signature was verified before durable admission. */
-/** Maritime agent states in which /chat is accepted but nothing reaches the agent. */
-const AGENT_NOT_READY = new Set(["building", "deploying", "starting", "creating", "pending", "queued", "provisioning", "updating", "restarting"]);
-
 /**
  * A /chat sent while the VM is still being built is accepted with a 200 and lost: the
  * first message after signup lands in that window (the connect page even invites it).
  * Ask Maritime for the agent's state first and report "not ready" so the caller's retry
  * (the durable inbox) delivers it later. An unreadable status does not block the send.
+ * AGENT_NOT_READY is shared with the file writers in provision.ts, which wait out
+ * the same window before writing brain files.
  */
 export async function agentNotReadyReason(user: Pick<UserRecord, "maritimeAgentId" | "createdAt">, deps: RelayDeps): Promise<string | undefined> {
   const agentId = user.maritimeAgentId;

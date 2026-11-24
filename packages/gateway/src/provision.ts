@@ -276,6 +276,145 @@ export class MaritimeApiError extends Error {
   }
 }
 
+/** The Maritime facts a request needs: auth options plus the injected fetch. */
+export type MaritimeRequestDeps = Pick<ProvisionDeps, "maritime" | "fetchImpl">;
+
+/**
+ * Maritime agent states in which file writes (and /chat) are rejected with a
+ * 409 — the VM is still building or bouncing. Shared with the webhook relay,
+ * which holds messages in the durable inbox for the same window.
+ */
+export const AGENT_NOT_READY = new Set([
+  "building",
+  "deploying",
+  "starting",
+  "creating",
+  "pending",
+  "queued",
+  "provisioning",
+  "updating",
+  "restarting",
+]);
+
+/** States an explicit POST /start has to leave first ("Agent is stopped. Start it first."). */
+const AGENT_START_NEEDED = new Set(["stopped", "paused", "sleeping"]);
+
+/** How long a push waits in total for its agent to become writable. */
+const AGENT_READY_TIMEOUT_MS = 300_000;
+const AGENT_READY_POLL_MS = 3_000;
+/** Backoff between write retries (covers a status that reads idle but is not yet). */
+const WRITE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Lower-cased agent status; undefined when unreadable (which never blocks a write). */
+async function readAgentStatus(deps: MaritimeRequestDeps, agentId: string): Promise<string | undefined> {
+  try {
+    const res = (await maritimeRequest(deps, "GET", `/api/agents/${encodeURIComponent(agentId)}`)) as { status?: unknown } | undefined;
+    const status = res?.status;
+    return typeof status === "string" ? status.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Block until the agent accepts file writes: start it when it is stopped or
+ * sleeping, poll while it is deploying. Returns false when it never became
+ * writable within `timeoutMs` — every write past that point would be rejected
+ * and counted as skipped, so callers fail fast instead of burning the push.
+ * An unreadable status counts as writable: a transient API hiccup must not
+ * stall a push (same rule the relay applies to /chat).
+ */
+export async function waitForAgentWritable(
+  deps: MaritimeRequestDeps,
+  agentId: string,
+  log?: Logger,
+  timeoutMs = AGENT_READY_TIMEOUT_MS,
+  pollMs = AGENT_READY_POLL_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let announced = false;
+  for (;;) {
+    const status = await readAgentStatus(deps, agentId);
+    let sleepMs = pollMs;
+    if (status && AGENT_START_NEEDED.has(status)) {
+      try {
+        await maritimeRequest(deps, "POST", `/api/agents/${encodeURIComponent(agentId)}/start`);
+        log?.info("agent.write_start", { agentId, status });
+        // A start flips the state quickly; don't wait a full poll for it.
+        sleepMs = Math.min(pollMs, 1_000);
+      } catch {
+        // Already starting or running — the poll below covers it.
+      }
+    } else if (!status || !AGENT_NOT_READY.has(status)) {
+      return true;
+    } else if (!announced) {
+      announced = true;
+      log?.info("agent.write_waiting", { agentId, status });
+    }
+    if (Date.now() >= deadline) {
+      log?.warn("agent.write_not_writable", { agentId, status, timeoutMs });
+      return false;
+    }
+    await sleep(sleepMs);
+  }
+}
+
+export type AgentFileWrite = (path: string, content: string) => Promise<void>;
+
+export interface AgentFileWriterOptions {
+  /** Total budget for waiting out deploy windows across the whole push. Default 5 min. */
+  readyTimeoutMs?: number;
+  /** Status poll interval while waiting. Default 3 s. */
+  readyPollMs?: number;
+}
+
+/**
+ * A `files/write` client for one agent that survives Maritime's deploy window.
+ * A 409 ("Agent is deploying" / "Agent is stopped") waits for the agent to
+ * become writable, then retries with backoff. The wait shares one budget for
+ * the whole push: once it is exhausted the writer marks itself blocked and
+ * rejects immediately, so a stuck agent fails fast instead of re-waiting the
+ * timeout for every one of the ~160 brain files.
+ */
+export function agentFileWriter(
+  deps: MaritimeRequestDeps,
+  agentId: string,
+  log?: Logger,
+  opts: AgentFileWriterOptions = {},
+): AgentFileWrite {
+  const readyTimeoutMs = opts.readyTimeoutMs ?? AGENT_READY_TIMEOUT_MS;
+  const readyPollMs = opts.readyPollMs ?? AGENT_READY_POLL_MS;
+  let waitDeadline: number | undefined;
+  let blocked: string | undefined;
+  return async (path, content) => {
+    if (blocked) throw new MaritimeApiError(409, blocked);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
+        return;
+      } catch (err) {
+        if (!(err instanceof MaritimeApiError) || err.status !== 409 || attempt >= WRITE_RETRY_DELAYS_MS.length) throw err;
+        waitDeadline ??= Date.now() + readyTimeoutMs;
+        const remaining = waitDeadline - Date.now();
+        if (remaining <= 0) {
+          blocked = `agent never became writable (${err.detail})`;
+          throw err;
+        }
+        log?.info("agent.write_retry", { agentId, path, attempt: attempt + 1, error: err.detail });
+        if (!(await waitForAgentWritable(deps, agentId, log, remaining, readyPollMs))) {
+          blocked = `agent never became writable (${err.detail})`;
+          throw err;
+        }
+        await sleep(WRITE_RETRY_DELAYS_MS[attempt]!);
+      }
+    }
+  };
+}
+
 interface MaritimeAgentJson {
   id?: string;
   projectId?: string | null;
@@ -283,7 +422,7 @@ interface MaritimeAgentJson {
 }
 
 export async function maritimeRequest(
-  deps: Pick<ProvisionDeps, "maritime" | "fetchImpl">,
+  deps: MaritimeRequestDeps,
   method: string,
   path: string,
   body?: unknown,
@@ -359,12 +498,13 @@ async function pushTemplateSkills(
   log: Logger,
 ): Promise<void> {
   if (!user.maritimeAgentId) return;
+  // A freshly created agent is still deploying: writes would answer
+  // "409 Agent is deploying" and every skill would be lost. The writer waits
+  // for the agent to become writable and retries, so the skills land.
+  const write = agentFileWriter(deps, user.maritimeAgentId, log);
   for (const skill of template.skills) {
     try {
-      await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(user.maritimeAgentId)}/files/write`, {
-        path: `/data/skills/${skill.name}/SKILL.md`,
-        content: skill.content,
-      });
+      await write(`/data/skills/${skill.name}/SKILL.md`, skill.content);
       log.info("provision.template_skill", { userId: user.id, skill: skill.name });
     } catch (err) {
       log.warn("provision.template_skill_failed", {
@@ -565,6 +705,7 @@ export async function provisionUser(input: ProvisionInput, deps: ProvisionDeps):
     // repo added after the first provision) lands on the next reconnect.
     if (user.brainRepo) {
       const agentId = user.maritimeAgentId;
+      const write = agentFileWriter(deps, agentId, log);
       // Ensure the agent is awake before pushing files.
       void (async () => {
         try {
@@ -577,9 +718,7 @@ export async function provisionUser(input: ProvisionInput, deps: ProvisionDeps):
             fetchImpl: deps.fetchImpl,
             githubToken: deps.githubToken,
             logger: log,
-            write: async (path, content) => {
-              await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-            },
+            write,
           });
         } catch (err: unknown) {
           log.warn("provision.brain_failed", { userId: user.id, repo: user.brainRepo, error: err instanceof Error ? err.message : String(err) });
@@ -671,9 +810,7 @@ export async function provisionUser(input: ProvisionInput, deps: ProvisionDeps):
           fetchImpl: deps.fetchImpl,
           githubToken: deps.githubToken,
           logger: log,
-          write: async (path, content) => {
-            await maritimeRequest(deps, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-          },
+          write: agentFileWriter(deps, agentId, log),
         });
         log.info("provision.brain_pushed", { userId: user.id, repo: user.brainRepo, ...pushed });
       } catch (err) {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { type SignupLimits, SlidingWindowLimiter, clientAddress, pendingCount, signupLimits } from "./limits.js";
 import { type Logger, consoleLogger } from "./logger.js";
 import { GITHUB_URL, type RouterInfo, connectRouterFor, renderConnect, renderLanding, renderLinkDone, renderMessage, renderPending } from "./pages.js";
-import { MaritimeApiError, type LinkPassthrough, type MaritimeProvisionOptions, healOxygenAccount, healPostizAccount, maritimeRequest, newUserId, provisionUser, syncAgentEnv } from "./provision.js";
+import { MaritimeApiError, type LinkPassthrough, type MaritimeProvisionOptions, agentFileWriter, healOxygenAccount, healPostizAccount, maritimeRequest, newUserId, provisionUser, syncAgentEnv } from "./provision.js";
 import { OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG, type ComposioPlatform } from "./composio.js";
 import { pushBrain } from "./brain.js";
 import { EventDeduper, type HeaderMap, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
@@ -539,9 +539,8 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
             fetchImpl: opts.fetchImpl,
             githubToken: opts.githubToken,
             logger: log,
-            write: async (path, content) => {
-              await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-            },
+            // Waits out a deploying/stopped agent instead of dropping the files.
+            write: agentFileWriter({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, agentId, log),
           });
         } catch (err: unknown) {
           log.warn("admin.brain_failed", { userId: healed.id, repo: healed.brainRepo, error: err instanceof Error ? err.message : String(err) });
@@ -684,9 +683,8 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
               fetchImpl: opts.fetchImpl,
               githubToken: opts.githubToken,
               logger: log,
-              write: async (path, content) => {
-                await maritimeRequest({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, "PUT", `/api/agents/${encodeURIComponent(agentId)}/files/write`, { path, content });
-              },
+              // Waits out a deploying/stopped agent instead of dropping the files.
+              write: agentFileWriter({ maritime: opts.maritime, fetchImpl: opts.fetchImpl }, agentId, log),
             });
             log.info("connect.brain_pushed", { userId: user.id, repo, ...r });
           } catch (err: unknown) {
