@@ -1,17 +1,18 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { verifyInkboxSignature } from "@open-instinct/inkbox";
 import type { InkboxProvisioner } from "@open-instinct/inkbox";
-import type { InstinctConfig } from "@open-instinct/core";
+import { encodeEvent, type InstinctConfig } from "@open-instinct/core";
 import { DurableInbox } from "@open-instinct/inkbox";
 import { join } from "node:path";
 import { type SignupLimits, SlidingWindowLimiter, clientAddress, pendingCount, signupLimits } from "./limits.js";
 import { type Logger, consoleLogger } from "./logger.js";
 import { GITHUB_URL, type RouterInfo, connectRouterFor, renderConnect, renderLanding, renderLinkDone, renderMessage, renderPending } from "./pages.js";
-import { MaritimeApiError, type LinkPassthrough, type MaritimeProvisionOptions, agentFileWriter, healOxygenAccount, healPostizAccount, maritimeRequest, newUserId, provisionUser, syncAgentEnv } from "./provision.js";
+import { MaritimeApiError, type LinkPassthrough, type MaritimeProvisionOptions, agentFileWriter, findOrCreateTemplateAgent, healOxygenAccount, healPostizAccount, maritimeRequest, newUserId, provisionUser, syncAgentEnv } from "./provision.js";
 import { OXYGEN_TOOLKIT_NAME, POSTIZ_TOOLKIT_SLUG, type ComposioPlatform } from "./composio.js";
 import { pushBrain } from "./brain.js";
-import { EventDeduper, type HeaderMap, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
+import { EventDeduper, type HeaderMap, agentNotReadyReason, isDeliveryEvent, postChat, type RelayDeps, relayVerifiedEvent, relayGatewayEvent, verifyForUser } from "./relay.js";
 import { type UserRecord, type UserStore, publicUser } from "./store.js";
-import { loadTemplateRegistry, type GatewayTemplate } from "./templates.js";
+import { loadTemplateRegistry, type GatewayTemplate, TEMPLATE_ID_RE } from "./templates.js";
 import { parseBrainUpdate, parsePostizKeyUpdate, secretMatches, validateSignup } from "./validate.js";
 
 export interface GatewayOptions {
@@ -52,6 +53,13 @@ export interface GatewayOptions {
   /** Max webhook body size in bytes. Default 1 MiB. */
   maxBodyBytes?: number;
   now?: () => number;
+  /**
+   * Signing key for template-scoped webhook endpoints
+   * (POST /webhooks/inkbox/template/<templateId>). Unknown numbers can text a
+   * template's agent without signing up. HMAC verified the same way as user
+   * webhooks. Unset disables template webhooks (404).
+   */
+  templateWebhookSigningKey?: string;
   /** Per-address and global signup caps. Defaults in limits.ts. */
   signupLimits?: Partial<SignupLimits>;
   /** Count signups by X-Forwarded-For instead of the socket address. Only behind a proxy you control. */
@@ -177,6 +185,14 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     snapshotAt: string;
   }>();
 
+  // Template webhooks: one rate limit per template (anonymous callers share an
+  // agent, so we rate limit by template to stop one sender flooding all of them).
+  const templateWebhookLimiter = new SlidingWindowLimiter(
+    limits.perIp,
+    limits.windowMs,
+    now,
+  );
+
   const relayDeps = {
     maritime: { apiKey: opts.maritime.apiKey, baseUrl: opts.maritime.baseUrl },
     fetchImpl: opts.fetchImpl,
@@ -184,10 +200,20 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     dedupe,
     ...(opts.checkAgentStatus !== undefined ? { checkAgentStatus: opts.checkAgentStatus } : {}),
   };
-  const inbox = new DurableInbox<{ userId: string; identityId: string; event: Record<string, unknown> }>({
+  const inbox = new DurableInbox<{ userId: string; identityId: string; event: Record<string, unknown>; templateId?: string }>({
     file: join(opts.store.dir, "webhook-inbox.json"),
     replayRunning: true,
-    handle: async ({ userId, identityId, event }) => {
+    handle: async ({ userId, identityId, event, templateId }) => {
+      // Template webhook events: no Inkbox identity, one shared agent per template.
+      if (templateId) {
+        const template = templates.get(templateId);
+        if (!template) throw new Error(`unknown template: ${templateId}`);
+        const agentId = await ensureTemplateAgent(templateId, template);
+        if (!agentId) throw new Error("template agent is not ready");
+        const result = await relayTemplateEvent(templateId, agentId, event, relayDeps);
+        if (result.status === "rejected") throw new Error(result.reason ?? "Forwarding failed");
+        return;
+      }
       const user = opts.store.get(userId);
       if (!user || user.identityId !== identityId) {
         const error = new Error("Webhook identity is no longer assigned to this user");
@@ -834,6 +860,95 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     res.end();
   }
 
+  /**
+   * Ensure one shared Maritime agent exists for a template. All anonymous
+   * callers share this agent; conversation isolation comes from the
+   * `conversation_id` on each /chat.
+   */
+  async function ensureTemplateAgent(templateId: string, template: GatewayTemplate): Promise<string | undefined> {
+    try {
+      const result = await findOrCreateTemplateAgent({ templateId }, {
+        maritime: opts.maritime,
+        fetchImpl: opts.fetchImpl,
+        logger: log,
+        template,
+      });
+      return result.maritimeAgentId;
+    } catch (err) {
+      log.warn("template.agent_failed", { templateId, error: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    }
+  }
+
+  /**
+   * Relay a verified template webhook event to the shared template agent.
+   * Uses the sender's phone as the conversation id so the same number stays in
+   * one thread; the agent re-keys conversations itself.
+   */
+  async function relayTemplateEvent(templateId: string, agentId: string, event: Record<string, unknown>, deps: RelayDeps): Promise<{ status: string; reason?: string }> {
+    const eventType = typeof event["event_type"] === "string" ? event["event_type"] : "";
+    if (isDeliveryEvent(eventType)) return { status: "ignored", reason: `delivery event ${eventType}` };
+
+    const senderPhone = typeof event["data"] === "object" && event["data"] !== null
+      ? (event["data"] as Record<string, unknown>)["from"] ?? (event["data"] as Record<string, unknown>)["phone"]
+      : undefined;
+    const conversationId = typeof senderPhone === "string" && senderPhone
+      ? `tpl:${templateId}:${senderPhone}`
+      : `tpl:${templateId}:unknown`;
+
+    const notReady = await agentNotReadyReason({ maritimeAgentId: agentId, createdAt: new Date().toISOString() }, deps);
+    if (notReady) return { status: "rejected", reason: notReady };
+
+    const body = { message: encodeEvent(event), conversation_id: conversationId };
+    const result = await postChat(agentId, body, deps);
+    log.info("template.relay_result", { templateId, agentId, eventType, ...result });
+    return result;
+  }
+
+  /**
+   * POST /webhooks/inkbox/template/<templateId>
+   * Template-scoped webhook: unknown numbers can text a template's agent
+   * without signing up. Signature verified with `templateWebhookSigningKey`.
+   * Rate limited per template + client address.
+   */
+  async function handleTemplateWebhook(req: IncomingMessage, res: ServerResponse, templateId: string): Promise<void> {
+    if (!TEMPLATE_ID_RE.test(templateId)) return json(res, 404, { error: "unknown template" });
+    const template = templates.get(templateId);
+    if (!template) return json(res, 404, { error: "unknown template" });
+    if (!opts.templateWebhookSigningKey) return json(res, 404, { error: "template webhooks are not enabled" });
+
+    const address = clientAddress(req, opts.trustProxy === true);
+    if (!templateWebhookLimiter.allow(`tpl:${templateId}:${address}`)) {
+      log.warn("template_webhook.rate_limited", { templateId, address });
+      return json(res, 429, { error: "too many messages from this address; try again later" });
+    }
+
+    const raw = await readBody(req, maxBody);
+    const headers = req.headers as HeaderMap;
+    if (!verifyInkboxSignature(raw, headers, opts.templateWebhookSigningKey)) {
+      log.warn("template_webhook.unauthorized", { templateId });
+      return json(res, 401, { error: "invalid signature" });
+    }
+
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+      if (!event || typeof event !== "object" || typeof event.id !== "string" || !event.id) throw new Error("invalid event");
+    } catch {
+      return json(res, 400, { error: "expected a webhook event with an id" });
+    }
+
+    // Find or create the shared template agent, then relay through the durable
+    // inbox so a deploying agent doesn't lose the message.
+    const agentId = await ensureTemplateAgent(templateId, template);
+    if (!agentId) return json(res, 503, { error: "template agent is not ready yet" });
+
+    const eventId = `tpl:${templateId}:${event.id}`;
+    inbox.enqueue(eventId, { userId: `tpl:${templateId}`, identityId: "", event, templateId });
+    res.writeHead(204);
+    res.end();
+  }
+
   /** Link sends the browser here after approval. The code goes to the agent, which holds the PKCE verifier. */
   const page = opts.renderPage ?? renderMessage;
   const linkDone = (ok: boolean): string =>
@@ -938,6 +1053,10 @@ export function createGateway(opts: GatewayOptions): GatewayServer {
     if (parts[0] === "webhooks" && parts[1] === "inkbox" && parts.length === 3) {
       if (method !== "POST") throw new HttpError(405, "method not allowed");
       return handleWebhook(req, res, decodeURIComponent(parts[2] ?? ""));
+    }
+    if (parts[0] === "webhooks" && parts[1] === "inkbox" && parts[2] === "template" && parts.length === 4) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      return handleTemplateWebhook(req, res, decodeURIComponent(parts[3] ?? ""));
     }
     if (parts[0] === "oauth" && parts[1] === "composio" && parts[2] === "callback") {
       if (method !== "GET") throw new HttpError(405, "method not allowed");

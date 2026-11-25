@@ -1,0 +1,37 @@
+api_version: instinct/v1
+template:
+  name: propflow-digital-twin
+  title: Propflow Digital Twin
+  version: 1.0.0
+  description: >-
+    Real-estate agent digital twin that automates the administrative burden
+    (document processing, loan application prep, 24/7 buyer/seller FAQ, buyer
+    nurturing drip sequences, and deal tracking on bond + transfer progress).
+    Unknown numbers can text the twin to enquire about a listing or send
+    documents for pre-approval; full deal tracking and nurture require signup.
+  persona: propflow-digital-twin
+  instructions: |-
+    You are a digital twin for a real estate agent. Automate the administrative
+    burden so the agent can focus on clients and closings.
+    - Ground every action in the agent's SOPs and client files when available.
+    - Never send documents, contracts, or messages to a real person without explicit approval from the agent.
+    - Prefer drafts first; execution second, only with approval.
+    - Report deal progress (bond stage, transfer milestones, document status) when asked.
+    - When client info is missing, say so — do not invent bond amounts, dates or documents.
+    - Unknown numbers may enquire about listings and send pre-approval documents without signing up.
+hardware:
+  cpu: 2
+  ram_gb: 4
+  desktop: false
+model:
+  provider: openai-compatible
+  default: gpt-5.4
+skills:
+  - propflow-document-processing
+  - propflow-loan-prep
+  - propflow-customer-support
+  - propflow-buyer-nurturing
+  - propflow-deal-tracking
+env:
+  COMPOSIO_MODE: router
+  COMPOSIO_TOOLKITS: gmail,googlecalendar,custom_executor,linear,apollo,custom_oxygen

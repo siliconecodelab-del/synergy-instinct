@@ -201,7 +201,7 @@ export async function relayGatewayEvent(user: UserRecord, event: Record<string, 
   return result;
 }
 
-async function postChat(agentId: string, body: { message: string; conversation_id: string }, deps: RelayDeps): Promise<RelayResult> {
+export async function postChat(agentId: string, body: { message: string; conversation_id: string }, deps: RelayDeps): Promise<RelayResult> {
   const f = deps.fetchImpl ?? globalThis.fetch;
   const base = (deps.maritime.baseUrl ?? DEFAULT_MARITIME_BASE_URL).replace(/\/+$/, "");
   const url = `${base}/api/agents/${encodeURIComponent(agentId)}/chat`;

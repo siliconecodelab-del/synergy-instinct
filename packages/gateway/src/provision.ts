@@ -467,7 +467,7 @@ async function findMaritimeAgent(deps: Pick<ProvisionDeps, "maritime" | "fetchIm
   return undefined;
 }
 
-async function createMaritimeAgent(user: UserRecord, deps: ProvisionDeps): Promise<MaritimeAgentJson> {
+export async function createMaritimeAgent(user: UserRecord, deps: ProvisionDeps): Promise<MaritimeAgentJson> {
   // Look first: a crash after the POST would otherwise create a second agent (and a second bill).
   const existing = await findMaritimeAgent(deps, user.id);
   if (existing) return existing;
@@ -479,6 +479,78 @@ async function createMaritimeAgent(user: UserRecord, deps: ProvisionDeps): Promi
     if (err instanceof MaritimeApiError && err.status === 409) {
       const raced = await findMaritimeAgent(deps, user.id);
       if (raced) return raced;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Find or create one shared Maritime agent per template. Anonymous callers all
+ * talk to the same agent; conversation isolation comes from Maritime's
+ * `conversation_id` on each /chat, not from separate agents. This keeps the
+ * operator's bill to one VM per template instead of one per anonymous phone.
+ */
+export interface TemplateAgentInput {
+  templateId: string;
+}
+
+export interface TemplateAgentResult {
+  maritimeAgentId: string;
+}
+
+export async function findOrCreateTemplateAgent(
+  input: TemplateAgentInput,
+  deps: Pick<ProvisionDeps, "maritime" | "fetchImpl" | "logger"> & { template: GatewayTemplate },
+): Promise<TemplateAgentResult> {
+  const log = deps.logger ?? silentLogger;
+  const externalId = `tpl:${input.templateId}`;
+
+  // Look first: an existing template agent (crash-safe dedupe).
+  const existing = await findMaritimeAgent(deps, externalId);
+  if (existing?.id) return { maritimeAgentId: existing.id };
+
+  try {
+    const user: UserRecord = {
+      id: externalId,
+      name: deps.template.title,
+      handle: `tpl-${input.templateId}`,
+      phone: "",
+      identityId: "",
+      identityApiKey: "",
+      signingKey: "",
+      createdAt: new Date().toISOString(),
+      status: "provisioning",
+      templateId: input.templateId,
+    };
+    const created = (await maritimeRequest(deps, "POST", "/api/agents", maritimeCreateBody(user, {
+      maritime: deps.maritime,
+      publicUrl: "",
+      template: deps.template,
+    } as unknown as AgentEnvDeps))) as MaritimeAgentJson | undefined;
+    if (!created?.id) throw new MaritimeApiError(500, "template agent create returned no id");
+    log.info("provision.template_agent_created", {
+      template: input.templateId,
+      agentId: created.id,
+      externalId,
+    });
+
+    // Push template skills best-effort; the writer waits out the deploy window.
+    if (deps.template.skills.length) {
+      await pushTemplateSkills(user, deps.template, {
+        inkbox: undefined as unknown as InkboxProvisioner,
+        maritime: deps.maritime,
+        publicUrl: "",
+        store: undefined as unknown as UserStore,
+        fetchImpl: deps.fetchImpl,
+        logger: log,
+        template: deps.template,
+      }, log);
+    }
+    return { maritimeAgentId: created.id };
+  } catch (err) {
+    if (err instanceof MaritimeApiError && err.status === 409) {
+      const raced = await findMaritimeAgent(deps, externalId);
+      if (raced?.id) return { maritimeAgentId: raced.id };
     }
     throw err;
   }

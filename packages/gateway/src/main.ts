@@ -66,6 +66,8 @@ export interface GatewayEnv {
   postizMcpUrl?: string;
   /** GATEWAY_ADMIN_TOKEN: bearer for POST /api/admin/desktop/<userId>. Unset disables the endpoint (503). */
   adminToken?: string;
+  /** GATEWAY_TEMPLATE_WEBHOOK_SIGNING_KEY: HMAC key for POST /webhooks/inkbox/template/<templateId>. */
+  templateWebhookSigningKey?: string;
   /** MARITIME_COMPUTERS_API_KEY: operator-minted computers-scoped key; wins over the gateway's own mint. */
   maritimeComputersKey?: string;
   /** GITHUB_TOKEN: fleet fallback for brain pushes into public repos (a person's token always wins). */
@@ -150,6 +152,7 @@ export function readEnv(env: NodeJS.ProcessEnv): GatewayEnv {
     executorMcpToken: env["EXECUTOR_MCP_TOKEN"] || undefined,
     postizMcpUrl: env["POSTIZ_MCP_URL"] || undefined,
     adminToken: env["GATEWAY_ADMIN_TOKEN"] || undefined,
+    templateWebhookSigningKey: env["GATEWAY_TEMPLATE_WEBHOOK_SIGNING_KEY"] || undefined,
     maritimeComputersKey: env["MARITIME_COMPUTERS_API_KEY"] || undefined,
     githubToken: env["GITHUB_TOKEN"] || undefined,
   };
@@ -276,6 +279,7 @@ export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
     composio,
     githubToken: cfg.githubToken,
     adminToken: cfg.adminToken,
+    templateWebhookSigningKey: cfg.templateWebhookSigningKey,
     link: cfg.link,
     trustProxy: cfg.trustProxy,
     templateDir: cfg.templatesDir,

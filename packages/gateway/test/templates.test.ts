@@ -8,10 +8,11 @@ const shipped = loadTemplateRegistry();
 
 describe("shipped template registry", () => {
   it("lists exactly the shipped ids with default present", () => {
-    expect(shipped.ids()).toEqual(["default", "gtm-ai"]);
+    expect(shipped.ids()).toEqual(["default", "gtm-ai", "propflow-digital-twin"]);
     expect(shipped.get(undefined)?.id).toBe(DEFAULT_TEMPLATE_ID);
     expect(shipped.resolve(undefined).id).toBe("default");
     expect(shipped.resolve("gtm-ai").id).toBe("gtm-ai");
+    expect(shipped.resolve("propflow-digital-twin").id).toBe("propflow-digital-twin");
   });
 
   it("default carries no persona or skills and a light desktop-less footprint", () => {
@@ -32,6 +33,22 @@ describe("shipped template registry", () => {
     expect(t.skills.length).toBeGreaterThan(1);
     const gtm = t.skills.find((s) => s.name === "gtm-playbook");
     expect(gtm?.content).toContain("Pain-Qualified");
+    expect(t.model).toEqual({ provider: "openai-compatible", default: "gpt-5.4" });
+    expect(t.env["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,custom_executor,linear,apollo,custom_oxygen");
+    expect(t.env["COMPOSIO_MODE"]).toBe("router");
+    expect(t.hardware).toEqual({ cpu: 2, ramGb: 4, desktop: false });
+  });
+
+  it("propflow-digital-twin carries real-estate persona, instructions and skills", () => {
+    const t = shipped.resolve("propflow-digital-twin");
+    expect(t.title).toBe("Propflow Digital Twin");
+    expect(t.persona).toContain("# Role — Propflow Digital Twin");
+    expect(t.instructions).toContain("explicit approval");
+    expect(t.skills.map((s) => s.name)).toContain("propflow-document-processing");
+    expect(t.skills.map((s) => s.name)).toContain("propflow-loan-prep");
+    expect(t.skills.map((s) => s.name)).toContain("propflow-customer-support");
+    expect(t.skills.map((s) => s.name)).toContain("propflow-buyer-nurturing");
+    expect(t.skills.map((s) => s.name)).toContain("propflow-deal-tracking");
     expect(t.model).toEqual({ provider: "openai-compatible", default: "gpt-5.4" });
     expect(t.env["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,custom_executor,linear,apollo,custom_oxygen");
     expect(t.env["COMPOSIO_MODE"]).toBe("router");
