@@ -21,7 +21,51 @@ model:
   provider: openai-compatible
   default: gpt-5.4
 skills:
+  - brand-review
+  - brand-system
+  - capture-context
+  - content-strategy
+  - content-waterfall
+  - flowchart
   - gtm-playbook
+  - graphics-designer
+  - launch-video
+  - lead-magnet-creator
+  - lead-magnet-delivery
+  - linkedin-copywriter
+  - linkedin-hook-writer
+  - linkedin-unibox-reply
+  - long-form
+  - longform-edit
+  - manim-video
+  - newsletter-writer
+  - oxygen-linkedin-marketing
+  - oxygen-quickstart
+  - oxygen-sequencer
+  - oxygen-unibox
+  - postiz
+  - qmd
+  - repurpose-content
+  - researcher
+  - setup-workspace
+  - shorts-audio
+  - shorts-cut
+  - shorts-edit
+  - shorts-motion
+  - shorts-qa
+  - talking-head-video-cut
+  - video-use
+  - voice-calibration
+  - week-posts
+  - x-article-writer
+  - x-copywriter
+  - x-planner
+  - youtube-description
+  - youtube-publisher
+  - youtube-script
+  - youtube-thumbnail
+  - youtube-thumbnail-outlier-research
+  - youtube-title-outlier-packaging
 env:
   # Router mode: executor tools are reachable at runtime through search + multi-execute
   # (direct mode's preload does not expose project custom toolkits).

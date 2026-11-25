@@ -28,8 +28,10 @@ describe("shipped template registry", () => {
     expect(t.title).toBe("AI-native GTM");
     expect(t.persona).toContain("# Role — AI-native GTM Operator");
     expect(t.instructions).toContain("explicit approval");
-    expect(t.skills.map((s) => s.name)).toEqual(["gtm-playbook"]);
-    expect(t.skills[0]?.content).toContain("Pain-Qualified");
+    expect(t.skills.map((s) => s.name)).toContain("gtm-playbook");
+    expect(t.skills.length).toBeGreaterThan(1);
+    const gtm = t.skills.find((s) => s.name === "gtm-playbook");
+    expect(gtm?.content).toContain("Pain-Qualified");
     expect(t.model).toEqual({ provider: "openai-compatible", default: "gpt-5.4" });
     expect(t.env["COMPOSIO_TOOLKITS"]).toBe("gmail,googlecalendar,custom_executor,linear,apollo,custom_oxygen");
     expect(t.env["COMPOSIO_MODE"]).toBe("router");
@@ -104,7 +106,11 @@ ${over}
     );
     const reg = loadTemplateRegistry(dir);
     expect(reg.ids()).toEqual(["default", "demo"]);
-    expect(reg.resolve("demo").skills[0]).toEqual({ name: "hello", content: "---\nname: hello\ndescription: h\n---\nHello" });
+    expect(reg.resolve("demo").skills[0]).toEqual({
+      name: "hello",
+      content: "---\nname: hello\ndescription: h\n---\nHello",
+      files: [{ relativePath: "SKILL.md", content: "---\nname: hello\ndescription: h\n---\nHello" }],
+    });
   });
 
   it("copies a shipped persona through a temp dir with matching content", () => {

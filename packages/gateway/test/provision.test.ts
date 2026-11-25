@@ -278,10 +278,14 @@ describe("templates in provisioning", () => {
   it("pushes template skills into /data/skills after the agent exists", async () => {
     const d = deps();
     await provisionUser(input, { ...d.deps, template: shipped.resolve("gtm-ai") });
-    const write = d.mar.calls.find((c) => c.method === "PUT" && c.url.includes("/files/write"));
+    const write = d.mar.calls.find(
+      (c) =>
+        c.method === "PUT" &&
+        c.url.includes("/files/write") &&
+        (c.body as { path?: string })?.path === "/data/skills/gtm-playbook/SKILL.md",
+    );
     expect(write).toBeDefined();
     expect(new URL(write!.url).pathname).toBe(`/api/agents/${d.store.byHandle("maria")?.maritimeAgentId}/files/write`);
-    expect(write!.body).toMatchObject({ path: "/data/skills/gtm-playbook/SKILL.md" });
     expect(String((write!.body as { content: string }).content)).toContain("Pain-Qualified");
   });
 

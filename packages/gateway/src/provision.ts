@@ -503,15 +503,18 @@ async function pushTemplateSkills(
   // for the agent to become writable and retries, so the skills land.
   const write = agentFileWriter(deps, user.maritimeAgentId, log);
   for (const skill of template.skills) {
-    try {
-      await write(`/data/skills/${skill.name}/SKILL.md`, skill.content);
-      log.info("provision.template_skill", { userId: user.id, skill: skill.name });
-    } catch (err) {
-      log.warn("provision.template_skill_failed", {
-        userId: user.id,
-        skill: skill.name,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    for (const file of skill.files) {
+      try {
+        await write(`/data/skills/${skill.name}/${file.relativePath}`, file.content);
+        log.info("provision.template_skill", { userId: user.id, skill: skill.name, file: file.relativePath });
+      } catch (err) {
+        log.warn("provision.template_skill_failed", {
+          userId: user.id,
+          skill: skill.name,
+          file: file.relativePath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 }

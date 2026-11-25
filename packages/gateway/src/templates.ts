@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
@@ -8,9 +8,17 @@ export const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const DEFAULT_TEMPLATE_ID = "default";
 export const TEMPLATE_API_VERSION = "instinct/v1";
 
+export interface TemplateSkillFile {
+  relativePath: string;
+  content: string;
+}
+
 export interface TemplateSkill {
   name: string;
+  /** SKILL.md content (kept as the first entry of `files`). */
   content: string;
+  /** All files under the skill directory, SKILL.md first, relative paths like `references/brief-template.md`. */
+  files: TemplateSkillFile[];
 }
 
 /** A deployable agent template: persona + standing instructions + skills + model + sizing. No secrets. */
@@ -41,6 +49,26 @@ export function defaultTemplateDir(): string {
 
 const VALID_CPU = new Set([1, 2, 4]);
 const VALID_RAM_GB = new Set([2, 4, 8, 16]);
+
+/** Collect every regular file under a skill directory, SKILL.md first, relative paths. Skips `.DS_Store`. */
+function collectSkillFiles(skillDir: string): TemplateSkillFile[] {
+  const skillFile = join(skillDir, "SKILL.md");
+  const files: TemplateSkillFile[] = [];
+  if (!existsSync(skillFile)) return files;
+  const skillContent = readFileSync(skillFile, "utf8");
+  files.push({ relativePath: "SKILL.md", content: skillContent });
+  const walk = (dir: string, base: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === ".DS_Store" || entry.name === "SKILL.md") continue;
+      const full = join(dir, entry.name);
+      const rel = base ? `${base}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(full, rel);
+      else if (entry.isFile()) files.push({ relativePath: rel, content: readFileSync(full, "utf8") });
+    }
+  };
+  walk(skillDir, "");
+  return files;
+}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -98,9 +126,11 @@ function loadTemplate(dir: string, id: string): GatewayTemplate {
   for (const entry of skillsRaw) {
     const skillName = str(entry);
     if (!TEMPLATE_ID_RE.test(skillName)) throw new TemplateError(`template ${id}: invalid skill name ${JSON.stringify(entry)}`);
-    const skillFile = join(dir, "skills", skillName, "SKILL.md");
+    const skillDir = join(dir, "skills", skillName);
+    const skillFile = join(skillDir, "SKILL.md");
     if (!existsSync(skillFile)) throw new TemplateError(`template ${id}: skill ${skillName} has no SKILL.md`);
-    skills.push({ name: skillName, content: readFileSync(skillFile, "utf8") });
+    const files = collectSkillFiles(skillDir);
+    skills.push({ name: skillName, content: files[0]?.content ?? "", files });
   }
 
   const envRaw = doc["env"] ?? {};
