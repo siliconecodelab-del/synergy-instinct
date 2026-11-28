@@ -205,12 +205,10 @@ export function agentEnvFor(user: UserRecord, deps: AgentEnvDeps): EnvVarInput[]
   if (!env.some((e) => e.key === "INSTINCT_AGENTRUN")) {
     env.push({ key: "INSTINCT_AGENTRUN", value: "1", isSecret: false });
   }
-  // Match the desktop flag the create body uses: an in-VM desktop when the VM
-  // has one (the historic default). A desktop-less agent still gets a hosted
-  // Maritime computer when a narrow computers key is available, via "auto"
-  // (desktopd -> maritime fallback); otherwise no computer at all.
+  // Every agent gets an in-VM desktop by default (4 GiB, 2 vCPU, XFCE + Chromium).
+  // A template may opt out with hardware.desktop: false; otherwise desktop is forced on.
   if (!env.some((e) => e.key === "INSTINCT_COMPUTER")) {
-    const desktop = deps.template ? deps.template.hardware.desktop : deps.maritime.desktop ?? true;
+    const desktop = deps.template ? deps.template.hardware.desktop ?? true : true;
     const mode = desktop ? "auto" : (deps.maritime.computersKey ? "auto" : "none");
     env.push({ key: "INSTINCT_COMPUTER", value: mode, isSecret: false });
   }
