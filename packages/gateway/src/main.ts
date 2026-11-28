@@ -10,14 +10,17 @@ import { UserStore } from "./store.js";
 export const DEFAULT_AGENT_IMAGE = "ghcr.io/siliconecodelab-del/synergy-instinct-agent:latest";
 
 /** Send a proactive welcome iMessage on the first inbound message from a user. */
-async function sendWelcomeMessage(user: { id: string; name: string; phone: string; handle: string; identityApiKey: string }): Promise<void> {
+async function sendWelcomeMessage(
+  user: { id: string; name: string; phone: string; handle: string; identityApiKey: string; templateId?: string },
+  welcomeText?: string,
+): Promise<void> {
   try {
     const inkbox = new Inkbox({ apiKey: user.identityApiKey });
     const identity = await inkbox.getIdentity(user.handle);
     if (!identity?.imessageEnabled) return;
     await identity.sendIMessage({
       to: user.phone,
-      text: `Hi ${user.name}! I'm your Instinct agent (@${user.handle}). I'm here and ready to help — I can assist with outbound campaigns, company brain research, SOP generation, and more. What would you like to work on first?`,
+      text: welcomeText ?? `Hi ${user.name}! I'm your Instinct agent (@${user.handle}). I'm here and ready to help — what would you like to work on first?`,
     });
   } catch (err) {
     console.warn("[welcome] failed to send", { userId: user.id, error: err instanceof Error ? err.message : String(err) });
@@ -293,7 +296,19 @@ export async function startGateway(cfg: GatewayEnv): Promise<GatewayServer> {
       const eventType = (event as Record<string, unknown>).event_type ?? (event as Record<string, unknown>).eventType;
       if (eventType !== "imessage.received") return;
       if (!user.phone || !user.identityApiKey) return;
-      await sendWelcomeMessage(user);
+      // Template-aware welcome: load the registry so the greeting matches the
+      // agent's persona instead of always mentioning GTM/outbound campaigns.
+      let welcomeText: string | undefined;
+      try {
+        const { loadTemplateRegistry, defaultTemplateDir } = await import("./templates.js");
+        const reg = loadTemplateRegistry(cfg.templatesDir || defaultTemplateDir());
+        const tmpl = reg.get(user.templateId);
+        const title = tmpl?.title ?? "Instinct";
+        welcomeText = `Hi ${user.name}! I'm your ${title} agent (@${user.handle}). I'm here and ready to help — what would you like to work on first?`;
+      } catch {
+        // Fall back to generic greeting if template lookup fails.
+      }
+      await sendWelcomeMessage(user, welcomeText);
       store.save({ ...user, welcomeSent: true });
       log.info("welcome.sent", { userId: user.id, handle: user.handle, to: user.phone });
     },

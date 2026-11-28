@@ -119,6 +119,9 @@ export async function pushBrain(repo: string, token: string | undefined, deps: B
   if (repoRes.status === 404) {
     throw new Error(`GitHub repo ${repo} was not found (a private repo needs a valid token)`);
   }
+  if (repoRes.status === 401 || repoRes.status === 403) {
+    throw new Error(`GitHub access denied for ${repo} — check that your token has read access and has not expired`);
+  }
   if (!repoRes.ok) throw new Error(`GitHub repo lookup failed: ${repoRes.status}`);
   const repoInfo = (await repoRes.json()) as { default_branch?: string };
   const branch = repoInfo.default_branch;

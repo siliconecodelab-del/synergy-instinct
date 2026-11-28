@@ -342,6 +342,89 @@ async function handleModels(req: http.IncomingMessage, res: http.ServerResponse)
   sendJson(res, 200, { object: "list", data });
 }
 
+// ── Layer 4: Resync endpoint ────────────────────────────────────────
+// Forces Open WebUI to sync all agent models from Supabase adapter table.
+// Called by claim-machine/delete-machine after model changes to ensure
+// Open WebUI's internal model DB is always in sync with adapter state.
+async function handleModelResync(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!validateAdapterToken(req)) {
+    return sendJson(res, 401, { error: { message: "Invalid or missing adapter token", type: "auth_error" } });
+  }
+
+  if (!OPENWEBUI_URL || !OPENWEBUI_ADMIN_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return sendJson(res, 500, {
+      error: { message: "Resync not configured — missing OpenWebUI/Supabase env vars", type: "server_error" },
+    });
+  }
+
+  try {
+    // 1. Fetch all adapter rows from Supabase
+    const supaRes = await fetch(
+      `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/instinct_agent_adapters?select=instinct_user_id,user_id&status=eq.ready`,
+      {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          Accept: "application/json",
+        },
+      },
+    );
+    if (!supaRes.ok) {
+      return sendJson(res, 500, {
+        error: { message: `Failed to fetch adapter rows (${supaRes.status})`, type: "server_error" },
+      });
+    }
+    const adapterRows = (await supaRes.json()) as Array<{ instinct_user_id: string; user_id: string }>;
+
+    // 2. Build model list for Open WebUI sync
+    const now = Math.floor(Date.now() / 1000);
+    const models = adapterRows.map((row) => ({
+      id: `instinct-agent-${row.instinct_user_id}`,
+      base_model_id: `instinct-agent-${row.instinct_user_id}`,
+      name: `Instinct Agent (${row.instinct_user_id})`,
+      meta: {
+        description: `Personal instinct agent for ${row.instinct_user_id}`,
+        profile_image_url: null,
+      },
+      params: {},
+      access_grants: [{ principal_type: "user", principal_id: row.user_id, permission: "read" }],
+      is_active: true,
+      updated_at: now,
+      created_at: now,
+    }));
+
+    // 3. Sync all models to Open WebUI
+    const syncRes = await fetch(`${OPENWEBUI_URL}/api/v1/models/sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENWEBUI_ADMIN_TOKEN}`,
+      },
+      body: JSON.stringify({ models }),
+    });
+
+    if (!syncRes.ok) {
+      const errText = await syncRes.text();
+      return sendJson(res, syncRes.status, {
+        error: { message: `Open WebUI sync failed (${syncRes.status}): ${errText.slice(0, 200)}`, type: "server_error" },
+      });
+    }
+
+    const syncData = (await syncRes.json()) as unknown;
+    sendJson(res, 200, {
+      object: "list",
+      data: models.map((m) => ({ id: m.id, object: "model", created: m.created_at, owned_by: "instinct-agent" })),
+      synced: models.length,
+      raw: syncData,
+    });
+  } catch (err) {
+    console.error(`[adapter] Resync error: ${(err as Error).message}`);
+    return sendJson(res, 500, {
+      error: { message: `Resync failed: ${(err as Error).message}`, type: "server_error" },
+    });
+  }
+}
+
 async function handleHealth(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   sendJson(res, 200, {
     status: "ok",
@@ -543,6 +626,11 @@ const server = http.createServer(async (req, res) => {
       (path === "/v1/models" || path === "/models")
     ) {
       await handleModels(req, res);
+    } else if (
+      method === "POST" &&
+      (path === "/v1/models/resync" || path === "/models/resync")
+    ) {
+      await handleModelResync(req, res);
     } else {
       sendJson(res, 404, { error: { message: "Not found", type: "not_found" } });
     }
